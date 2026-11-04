@@ -8,7 +8,6 @@ const PLIST_LABEL: &str = "com.autocode.app";
 fn plist_path() -> Result<PathBuf> {
     let home = dirs::home_dir().context("无法获取用户主目录")?;
     let dir = home.join("Library/LaunchAgents");
-    fs::create_dir_all(&dir)?;
     Ok(dir.join(format!("{}.plist", PLIST_LABEL)))
 }
 
@@ -52,6 +51,9 @@ fn generate_plist(exe_path: &str) -> String {
 /// 注册开机自启（创建 LaunchAgent plist）
 pub fn enable() -> Result<()> {
     let path = plist_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
     let exe = app_executable()?;
     let exe_str = exe.to_string_lossy();
 

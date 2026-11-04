@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "AutoCode",
-  "version": "0.3.1",
+  "version": "0.6.0",
   "identifier": "com.autocode.app",
   "build": {
     "frontendDist": "../src"
@@ -25,7 +25,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-src 'none'"
     }
   },
   "bundle": {
@@ -40,17 +40,16 @@
     ],
     "macOS": {
       "entitlements": "Entitlements.plist",
+      "infoPlist": "Info.plist",
       "minimumSystemVersion": "12.0",
       "signingIdentity": "-"
     }
   },
   "plugins": {
     "updater": {
-      "active": true,
       "endpoints": [
         "https://github.com/skernelx/AutoCode/releases/latest/download/latest.json"
       ],
-      "dialog": true,
       "pubkey": ""
     }
   }

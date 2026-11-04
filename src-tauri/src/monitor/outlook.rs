@@ -1,15 +1,19 @@
 use anyhow::{Context, Result};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
+use std::hash::{Hash, Hasher};
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Instant, UNIX_EPOCH};
 use tokio::time::{self, Duration};
 
-use super::{IncomingMessage, MessageSender};
+use super::{IncomingMessage, MessageSender, SourceReporter};
 
 /// Spotlight 命中的邮件候选
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct SpotlightHit {
     source: String,
     path: String,
@@ -34,6 +38,63 @@ struct SpotlightEmail {
 const POLL_SECONDS: u64 = 3;
 const OUTLOOK_LABEL: &str = "Outlook";
 const OUTLOOK_ROOT: &str = "Library/Group Containers/UBF8T346G9.Office/Outlook";
+
+static STARTED_AT: OnceLock<f64> = OnceLock::new();
+static PROCESSED: OnceLock<Mutex<HashMap<String, (u64, Instant)>>> = OnceLock::new();
+
+/// 避免 mdfind/mdls 卡住监督任务，同时排空管道防止大正文堵塞子进程。
+pub(super) fn timed_output(command: &mut Command) -> Result<Output> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let stdout = child.stdout.take().context("缺少命令 stdout")?;
+    let stderr = child.stderr.take().context("缺少命令 stderr")?;
+    let out_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout
+            .take(10 * 1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes)
+    });
+    let err_reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stderr
+            .take(64 * 1024)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes)
+    });
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break status;
+        }
+        if started.elapsed() > Duration::from_secs(5) {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = out_reader.join();
+            let _ = err_reader.join();
+            anyhow::bail!("Spotlight 命令超过5秒，已终止本次子进程");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let stdout = out_reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("stdout 读取任务失败"))??;
+    let stderr = err_reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("stderr 读取任务失败"))??;
+    anyhow::ensure!(
+        stdout.len() <= 10 * 1024 * 1024,
+        "Spotlight 返回内容超过10MiB上限"
+    );
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
 
 fn add_target(
     targets: &mut Vec<SpotlightTarget>,
@@ -232,22 +293,19 @@ fn query_recent_in_target(
     target: &SpotlightTarget,
     since_seconds: u64,
 ) -> Result<Vec<SpotlightHit>> {
-    let output = Command::new("mdfind")
-        .args([
-            "-onlyin",
-            target.root.to_string_lossy().as_ref(),
-            &format!(
-                "kMDItemContentModificationDate >= $time.now(-{})",
-                since_seconds
-            ),
-        ])
-        .output()
-        .context("执行 mdfind 失败")?;
+    let output = timed_output(Command::new("/usr/bin/mdfind").args([
+        "-onlyin",
+        target.root.to_string_lossy().as_ref(),
+        &format!(
+            "kMDItemContentModificationDate >= $time.now(-{})",
+            since_seconds
+        ),
+    ]))
+    .context("执行 mdfind 失败")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        log::warn!("mdfind 返回错误 [{}]: {}", target.label, stderr);
-        return Ok(vec![]);
+        anyhow::bail!("mdfind 返回错误 [{}]: {}", target.label, stderr.trim());
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -268,131 +326,73 @@ fn query_recent_in_target(
 fn query_recent_spotlight_emails(
     targets: &[SpotlightTarget],
     since_seconds: u64,
-) -> Vec<SpotlightHit> {
+) -> Result<Vec<SpotlightHit>> {
     let mut merged = Vec::new();
     let mut seen_paths = HashSet::new();
 
     for target in targets {
-        match query_recent_in_target(target, since_seconds) {
-            Ok(hits) => {
-                for hit in hits {
-                    if seen_paths.insert(hit.path.clone()) {
-                        merged.push(hit);
-                    }
-                }
-            }
-            Err(e) => {
-                log::warn!("查询 Spotlight 目标失败 [{}]: {}", target.label, e);
+        for hit in query_recent_in_target(target, since_seconds)? {
+            if seen_paths.insert(hit.path.clone()) {
+                merged.push(hit);
             }
         }
     }
 
-    merged
+    Ok(merged)
 }
 
 /// 使用 mdls 获取文件的 Spotlight 元数据
 fn get_spotlight_metadata(path: &str) -> Result<SpotlightEmail> {
-    let output = Command::new("mdls")
-        .args([
-            "-name",
-            "kMDItemSubject",
-            "-name",
-            "kMDItemTextContent",
-            "-name",
-            "kMDItemAuthors",
-            "-name",
-            "kMDItemDisplayName",
-            path,
-        ])
-        .output()
-        .context("执行 mdls 失败")?;
+    let output = timed_output(Command::new("/usr/bin/mdls").args([
+        "-raw",
+        "-nullMarker",
+        "[[AUTOCODE_NULL]]",
+        "-name",
+        "kMDItemSubject",
+        "-name",
+        "kMDItemTextContent",
+        "-name",
+        "kMDItemAuthors",
+        "-name",
+        "kMDItemDisplayName",
+        path,
+    ]))
+    .context("执行 mdls 失败")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         anyhow::bail!("mdls 命令失败: {}", stderr.trim());
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_spotlight_metadata(&output.stdout)
+}
+
+fn parse_spotlight_metadata(raw: &[u8]) -> Result<SpotlightEmail> {
+    // mdls(1) 的 -raw 明确按请求顺序用 NUL 分隔字段；正文中的换行、引号或等号不再被误当字段。
+    let mut fields = raw.split(|byte| *byte == 0).collect::<Vec<_>>();
+    if fields.last().is_some_and(|field| field.is_empty()) {
+        fields.pop();
+    }
+    anyhow::ensure!(fields.len() == 4, "mdls -raw 字段数量不符合预期");
     let mut email = SpotlightEmail {
         subject: None,
         content: None,
         author: None,
     };
-
-    // mdls 输出可能包含多行值（尤其是 kMDItemTextContent），需要正确处理
-    let mut current_key: Option<&str> = None;
-    let mut current_value = String::new();
-    let mut in_multiline = false;
-
-    for line in stdout.lines() {
-        let trimmed = line.trim();
-
-        // 检查是否新的 key = value 行
-        if let Some(eq_pos) = trimmed.find(" = ") {
-            // 先保存上一个 key 的值
-            if let Some(key) = current_key.take() {
-                apply_metadata_value(&mut email, key, &current_value);
-            }
-
-            let key = trimmed[..eq_pos].trim();
-            let value = trimmed[eq_pos + 3..].trim();
-
-            if value == "(null)" {
-                current_key = None;
-                current_value.clear();
-                in_multiline = false;
-            } else if value.starts_with('"') && value.ends_with('"') && value.len() > 1 {
-                // 单行字符串值 — 直接保存
-                let single_value = value[1..value.len() - 1].to_string();
-                apply_metadata_value(&mut email, key, &single_value);
-                current_key = None;
-                current_value.clear();
-                in_multiline = false;
-            } else if value.starts_with('"') {
-                // 多行字符串值的开始
-                let _ = current_key.replace(key);
-                current_value = value[1..].to_string();
-                in_multiline = true;
-            } else if value.starts_with('(') {
-                // 数组值
-                let _ = current_key.replace(key);
-                current_value = value.to_string();
-                in_multiline = !value.ends_with(')');
-            } else {
-                current_value = value.to_string();
-                apply_metadata_value(&mut email, key, &current_value);
-                current_key = None;
-                current_value.clear();
-                in_multiline = false;
-            }
-        } else if in_multiline {
-            // 多行值的后续行
-            if trimmed.ends_with('"') || trimmed.ends_with(')') {
-                let end = if trimmed.ends_with('"') {
-                    &trimmed[..trimmed.len() - 1]
-                } else {
-                    trimmed
-                };
-                current_value.push('\n');
-                current_value.push_str(end);
-                in_multiline = false;
-
-                if let Some(key) = current_key.take() {
-                    apply_metadata_value(&mut email, key, &current_value);
-                }
-                current_value.clear();
-            } else {
-                current_value.push('\n');
-                current_value.push_str(trimmed);
-            }
+    for (key, raw) in [
+        "kMDItemSubject",
+        "kMDItemTextContent",
+        "kMDItemAuthors",
+        "kMDItemDisplayName",
+    ]
+    .into_iter()
+    .zip(fields)
+    {
+        let value = std::str::from_utf8(raw).context("Spotlight 文本不是有效 UTF-8")?;
+        if value != "[[AUTOCODE_NULL]]" {
+            apply_metadata_value(&mut email, key, value);
         }
     }
-
-    // 处理最后一个 key
-    if let Some(key) = current_key {
-        apply_metadata_value(&mut email, key, &current_value);
-    }
-
     Ok(email)
 }
 
@@ -404,7 +404,7 @@ fn apply_metadata_value(email: &mut SpotlightEmail, key: &str, value: &str) {
     }
 
     // 处理数组格式 ("val1", "val2")
-    let final_value = if clean_value.starts_with('(') {
+    let final_value = if key == "kMDItemAuthors" && clean_value.starts_with('(') {
         clean_value
             .trim_start_matches('(')
             .trim_end_matches(')')
@@ -433,114 +433,161 @@ fn apply_metadata_value(email: &mut SpotlightEmail, key: &str, value: &str) {
     }
 }
 
-/// 通用 Spotlight 邮件监控主循环（保留 Outlook 完整兼容）
-pub async fn monitor(tx: MessageSender) -> Result<()> {
-    log::info!("Spotlight 邮件监控启动");
+fn file_signature(path: &str) -> Result<(u64, f64)> {
+    let metadata = fs::metadata(path)?;
+    let modified = metadata.modified()?.duration_since(UNIX_EPOCH)?;
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    metadata.len().hash(&mut hash);
+    modified.as_nanos().hash(&mut hash);
+    Ok((hash.finish(), modified.as_secs_f64()))
+}
 
-    // 可扫描的邮件目录目标
-    let mut targets = discover_targets().unwrap_or_default();
-    if targets.is_empty() {
-        log::warn!("Spotlight 未发现可用邮件目录，稍后会自动重试发现");
-    } else {
-        log::info!("Spotlight 已发现 {} 个邮件目录目标", targets.len());
-    }
+fn email_text(email: &SpotlightEmail) -> Option<String> {
+    // 只有标题而正文仍是 null 时，不提前标记 processed；索引可能尚未完成。
+    let content = email
+        .content
+        .as_ref()
+        .filter(|body| !body.trim().is_empty())?;
+    Some(
+        match email.subject.as_ref().filter(|subject| !subject.is_empty()) {
+            Some(subject) => format!("{subject}\n{content}"),
+            None => content.clone(),
+        },
+    )
+}
 
-    // 已处理过的文件路径集合
-    let mut processed: HashSet<String> = HashSet::new();
-
-    // 首次启动：标记当前已有的文件为已处理
-    for hit in query_recent_spotlight_emails(&targets, 60) {
-        processed.insert(hit.path);
-    }
-    if !processed.is_empty() {
-        log::info!("Spotlight 初始化：标记 {} 条已有记录", processed.len());
-    }
-
-    // 轮询间隔
+pub async fn monitor(tx: MessageSender, reporter: SourceReporter) -> Result<()> {
+    let started_at =
+        *STARTED_AT.get_or_init(|| chrono::Utc::now().timestamp_millis() as f64 / 1000.0);
+    let processed = PROCESSED.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut targets = tokio::task::spawn_blocking(discover_targets)
+        .await
+        .context("Spotlight 目录发现任务失败")??;
+    anyhow::ensure!(
+        !targets.is_empty(),
+        "未发现可用 Spotlight 邮件目录；监督者稍后重新检查"
+    );
+    let mut pending = HashMap::<String, (SpotlightHit, Instant)>::new();
     let mut interval = time::interval(Duration::from_secs(POLL_SECONDS));
-    let mut tick_count: u64 = 0;
-
+    let mut tick_count = 0u64;
     loop {
         interval.tick().await;
         tick_count += 1;
-
-        // 周期性重新发现目录，支持后续安装/迁移邮件客户端
         if tick_count % 40 == 0 {
-            match discover_targets() {
-                Ok(new_targets) => {
-                    if !new_targets.is_empty() && new_targets.len() != targets.len() {
-                        log::info!(
-                            "Spotlight 目标目录更新: {} -> {}",
-                            targets.len(),
-                            new_targets.len()
-                        );
-                    }
-                    targets = new_targets;
+            targets = tokio::task::spawn_blocking(discover_targets)
+                .await
+                .context("Spotlight 目录更新任务失败")??;
+            anyhow::ensure!(!targets.is_empty(), "Spotlight 邮件目录当前不可用");
+        }
+        let query_targets = targets.clone();
+        let hits =
+            tokio::task::spawn_blocking(move || query_recent_spotlight_emails(&query_targets, 120))
+                .await
+                .context("Spotlight 查询任务失败")??;
+        for hit in hits {
+            // 不读取启动前的历史邮件；监督重启复用同一启动时间。
+            let signature_path = hit.path.clone();
+            let signature = tokio::task::spawn_blocking(move || file_signature(&signature_path))
+                .await
+                .context("Spotlight 文件检查任务失败")?;
+            if let Ok((signature, modified)) = signature {
+                if modified < started_at {
+                    continue;
                 }
-                Err(e) => {
-                    log::warn!("重新发现 Spotlight 目标失败: {}", e);
+                let duplicate = {
+                    let mut done = processed
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("Spotlight 去重锁已损坏"))?;
+                    done.retain(|_, (_, seen)| seen.elapsed() < Duration::from_secs(600));
+                    done.get(&hit.path)
+                        .is_some_and(|(old, _)| *old == signature)
+                };
+                if duplicate {
+                    continue;
+                }
+            }
+            pending
+                .entry(hit.path.clone())
+                .or_insert_with(|| (hit, Instant::now()));
+        }
+        let candidates: Vec<_> = pending.values().cloned().collect();
+        let mut healthy = true;
+        for (hit, first_seen) in candidates {
+            let candidate_path = hit.path.clone();
+            let result = tokio::task::spawn_blocking(move || -> Result<_> {
+                let email = get_spotlight_metadata(&candidate_path)?;
+                let text = email_text(&email).context("Spotlight 邮件正文尚未建立索引")?;
+                let (signature, received_at) = file_signature(&candidate_path)?;
+                Ok((email, text, signature, received_at))
+            })
+            .await
+            .context("Spotlight 元数据任务失败")?;
+            match result {
+                Ok((email, text, signature, received_at)) => {
+                    tx.send(IncomingMessage {
+                        kind: super::SourceKind::Outlook,
+                        source: hit.source,
+                        text,
+                        sender: email.author,
+                        id: format!("spotlight:{}:{signature:016x}", hit.path),
+                        received_at,
+                    })
+                    .await
+                    .context("Spotlight 消息通道已关闭")?;
+                    processed
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("Spotlight 去重锁已损坏"))?
+                        .insert(hit.path.clone(), (signature, Instant::now()));
+                    pending.remove(&hit.path);
+                }
+                Err(error) => {
+                    healthy = false;
+                    reporter.error(&format!("Spotlight 元数据暂不可用：{error}"));
+                    if first_seen.elapsed() > Duration::from_secs(600) {
+                        pending.remove(&hit.path);
+                    }
+                    // 失败不写入 processed；即使移出最近查询窗口，也由 pending 继续重试。
                 }
             }
         }
-
-        if targets.is_empty() {
-            continue;
+        if healthy {
+            reporter.running();
         }
+    }
+}
 
-        // 查询最近 10 秒内修改的文件
-        for hit in query_recent_spotlight_emails(&targets, 10) {
-            if processed.contains(&hit.path) {
-                continue;
-            }
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-            // 标记为已处理
-            processed.insert(hit.path.clone());
+    #[test]
+    fn raw_metadata_preserves_multiline_equals_and_quotes() {
+        let parsed = parse_spotlight_metadata(b"Verification\0line = one\nVerification code: 123456 \"quoted\"\0(sample@example.invalid)\0display\0").unwrap();
+        assert_eq!(
+            parsed.content.as_deref(),
+            Some("line = one\nVerification code: 123456 \"quoted\"")
+        );
+        assert_eq!(parsed.author.as_deref(), Some("sample@example.invalid"));
+    }
 
-            // 获取元数据
-            match get_spotlight_metadata(&hit.path) {
-                Ok(email) => {
-                    // 合并主题和内容
-                    let text = match (&email.subject, &email.content) {
-                        (Some(subj), Some(content)) => format!("{}\n{}", subj, content),
-                        (Some(subj), None) => subj.clone(),
-                        (None, Some(content)) => content.clone(),
-                        (None, None) => continue,
-                    };
+    #[test]
+    fn missing_content_remains_retryable() {
+        let parsed = parse_spotlight_metadata(
+            b"Verification code\0[[AUTOCODE_NULL]]\0[[AUTOCODE_NULL]]\0display",
+        )
+        .unwrap();
+        assert!(email_text(&parsed).is_none());
+    }
 
-                    if text.is_empty() {
-                        continue;
-                    }
-
-                    log::debug!(
-                        "{} 新邮件: {} (发件人: {:?})",
-                        hit.source,
-                        &text[..text.len().min(80)],
-                        email.author
-                    );
-
-                    if tx
-                        .send(IncomingMessage {
-                            source: hit.source,
-                            text,
-                            sender: email.author,
-                        })
-                        .await
-                        .is_err()
-                    {
-                        log::error!("消息通道已关闭");
-                        return Ok(());
-                    }
-                }
-                Err(e) => {
-                    log::warn!("读取 Spotlight 邮件元数据失败: {}", e);
-                }
-            }
-        }
-
-        // 定期清理已处理集合，防止内存无限增长
-        if processed.len() > 20000 {
-            processed.clear();
-            log::debug!("清理 Spotlight 已处理邮件缓存");
-        }
+    #[test]
+    fn parentheses_in_body_are_not_treated_as_author_array() {
+        let parsed = parse_spotlight_metadata(
+            b"subject\0(Verification code: 123456)\0[[AUTOCODE_NULL]]\0display",
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.content.as_deref(),
+            Some("(Verification code: 123456)")
+        );
     }
 }

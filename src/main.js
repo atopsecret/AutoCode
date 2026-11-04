@@ -2,12 +2,31 @@
 // AutoCode 前端 — 主页 + 设置面板
 // ============================================================
 
+import { ConfigEditor, SourceStateStore, LatestCodeStore, errorText } from './ui-state.js';
+
 const history = [];
 const MAX_HISTORY = 20;
 let currentConfig = null;  // 当前配置对象
+const configEditor = new ConfigEditor();
+const sourceStates = new SourceStateStore();
+const latestCode = new LatestCodeStore();
+let updateBusy = false;
+let saveBusy = false;
+let saveToastTimer;
+let lastPermissions = null;
+let startupEvents = 0;
+
+const configFields = {
+  'cfg-listen-imessage': 'listen_imessage',
+  'cfg-listen-apple-mail': 'listen_apple_mail',
+  'cfg-listen-outlook': 'listen_outlook',
+  'cfg-listen-notification': 'listen_notification',
+  'cfg-auto-enter': 'auto_enter',
+  'cfg-launch-at-login': 'launch_at_login',
+};
 
 // ===================== 初始化 =====================
-function initApp() {
+async function initApp() {
   setupTabs();
   setupDelaySlider();
 
@@ -15,32 +34,45 @@ function initApp() {
     // 版本号
     window.__TAURI__.core.invoke('get_version').then(function (v) {
       document.getElementById('version').textContent = 'v' + v;
-    });
-
-    // 加载配置
-    window.__TAURI__.core.invoke('get_config').then(function (cfg) {
-      currentConfig = cfg;
-      applyConfigToUI(cfg);
-    });
+      // 同时更新设置页面的版本显示
+      document.getElementById('current-version').textContent = '当前版本：v' + v;
+    }).catch(showError);
+    refreshStartupError();
 
     // 监听验证码事件
-    window.__TAURI__.event.listen('verification-code', function (ev) {
-      var d = ev.payload;
-      showCode(d.code, d.source, d.strategy, d.confidence);
+    await window.__TAURI__.event.listen('verification-code', function (ev) {
+      if (latestCode.event(ev.payload)) showLatestCode();
+    });
+    await window.__TAURI__.event.listen('config-changed', function (ev) {
+      receiveConfig(ev.payload);
+    });
+    await window.__TAURI__.event.listen('monitor-status', function (ev) {
+      sourceStates.event(ev.payload);
+      renderMonitorStatus();
+    });
+    await window.__TAURI__.event.listen('startup-error', function (ev) {
+      startupEvents += 1;
+      renderStartupError(ev.payload);
+    });
+    await window.__TAURI__.event.listen('app-error', function (ev) {
+      showError(ev.payload);
     });
 
     // 监听后端发起的跳转到设置页
-    window.__TAURI__.event.listen('navigate', function (ev) {
+    await window.__TAURI__.event.listen('navigate', function (ev) {
       if (ev.payload === 'settings') {
         switchTab('settings');
       }
     });
 
-    // 启动时检查权限
+    // 先注册监听，再取快照，避免慢的初始请求覆盖较新的托盘/验证码事件。
+    window.__TAURI__.core.invoke('get_config').then(receiveConfig).catch(showError);
+    refreshMonitorStatus();
+    const codeToken = latestCode.token();
+    window.__TAURI__.core.invoke('get_latest_code').then(function (value) {
+      if (latestCode.snapshot(value, codeToken)) showLatestCode();
+    }).catch(showError);
     checkPermissions();
-
-    // 启动时检查更新
-    checkForUpdates();
   }
 
   // 按钮事件
@@ -50,10 +82,10 @@ function initApp() {
 
   // 权限检测按钮
   document.getElementById('btn-open-fda').addEventListener('click', function () {
-    if (window.__TAURI__) window.__TAURI__.core.invoke('open_fda_settings');
+    if (window.__TAURI__) window.__TAURI__.core.invoke('open_fda_settings').catch(showError);
   });
   document.getElementById('btn-open-acc').addEventListener('click', function () {
-    if (window.__TAURI__) window.__TAURI__.core.invoke('open_accessibility_settings');
+    if (window.__TAURI__) window.__TAURI__.core.invoke('open_accessibility_settings').catch(showError);
   });
   document.getElementById('btn-recheck').addEventListener('click', checkPermissions);
 
@@ -62,28 +94,39 @@ function initApp() {
     checkForUpdates(true);
   });
 
+  for (const [id, field] of Object.entries(configFields)) {
+    document.getElementById(id).addEventListener('change', function (event) {
+      configEditor.edit(field, event.target.checked);
+    });
+  }
+  document.querySelectorAll('input[name="paste_mode"]').forEach(function (radio) {
+    radio.addEventListener('change', function () {
+      if (radio.checked) configEditor.edit('paste_mode', radio.value);
+    });
+  });
+
   // 添加项目按钮
   document.getElementById('add-keyword').addEventListener('click', function () {
     showInlineInput('keyword-list', function (val) {
-      if (currentConfig) currentConfig.verification_keywords.push(val);
+      editList('verification_keywords', function (items) { items.push(val); });
       renderKeywords();
     });
   });
   document.getElementById('add-sender').addEventListener('click', function () {
     showInlineInput('sender-list', function (val) {
-      if (currentConfig) currentConfig.known_2fa_senders.push(val);
+      editList('known_2fa_senders', function (items) { items.push(val); });
       renderSenders();
     });
   });
   document.getElementById('add-pattern').addEventListener('click', function () {
     showInlineInput('pattern-list', function (val) {
-      if (currentConfig) currentConfig.verification_patterns.push(val);
+      editList('verification_patterns', function (items) { items.push(val); });
       renderPatterns();
     });
   });
   document.getElementById('add-autofill-app').addEventListener('click', function () {
     showInlineInput('autofill-app-list', function (val) {
-      if (currentConfig) currentConfig.native_autofill_apps.push(val);
+      editList('native_autofill_apps', function (items) { items.push(val); });
       renderAutofillApps();
     });
   });
@@ -94,13 +137,22 @@ function checkPermissions() {
   if (!window.__TAURI__) return;
 
   window.__TAURI__.core.invoke('check_permissions').then(function (status) {
+    lastPermissions = status;
+    renderPermissions(status);
+    refreshMonitorStatus();
+  }).catch(showError);
+}
+
+function renderPermissions(status) {
     var banner = document.getElementById('perm-banner');
     var fdaEl = document.getElementById('perm-fda');
     var accEl = document.getElementById('perm-acc');
     var titleEl = banner.querySelector('.perm-title');
 
-    var needsFDA = !status.full_disk_access;
-    var needsAcc = !status.accessibility;
+    // FDA 是来源访问的提示，不是以 chat.db 存在与否替代所有监控状态。
+    var needsFDA = status.full_disk_access === false;
+    var needsAcc = !status.accessibility && currentConfig &&
+      ['smart', 'always'].includes(currentConfig.paste_mode);
 
     fdaEl.style.display = needsFDA ? 'flex' : 'none';
     accEl.style.display = needsAcc ? 'flex' : 'none';
@@ -111,17 +163,68 @@ function checkPermissions() {
       titleEl.innerHTML =
         '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg> 需要权限';
     } else {
-      // 全部已授权 — 短暂显示成功提示后隐藏
-      banner.style.display = 'block';
+      // 没有待处理权限时直接隐藏，不用旧计时器隐藏后来的权限错误。
+      banner.style.display = 'none';
       banner.classList.add('all-granted');
       titleEl.innerHTML =
         '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg> 权限已就绪';
-      document.getElementById('btn-recheck').style.display = 'none';
-      setTimeout(function () {
-        banner.style.display = 'none';
-      }, 3000);
+      document.getElementById('btn-recheck').style.display = '';
     }
-  });
+}
+
+function receiveConfig(cfg) {
+  if (!configEditor.merge(cfg)) return;
+  currentConfig = configEditor.draft;
+  applyConfigToUI(currentConfig);
+}
+
+function renderStartupError(error) {
+  const banner = document.getElementById('startup-error');
+  banner.hidden = !error;
+  banner.textContent = error ? '配置加载失败，已暂停全部监控：' + errorText(error) : '';
+}
+
+async function refreshStartupError() {
+  if (!window.__TAURI__) return;
+  const token = startupEvents;
+  try {
+    const error = await window.__TAURI__.core.invoke('get_startup_error');
+    if (startupEvents === token) renderStartupError(error);
+  } catch (error) { showError(error); }
+}
+
+async function refreshMonitorStatus() {
+  if (!window.__TAURI__) return;
+  const token = sourceStates.token();
+  try {
+    const statuses = await window.__TAURI__.core.invoke('get_monitor_status');
+    sourceStates.snapshot(statuses, token);
+    renderMonitorStatus();
+  } catch (error) { showError(error); }
+}
+
+function renderMonitorStatus() {
+  const ids = { imessage: 'status-imessage', apple_mail: 'status-applemail',
+    outlook: 'status-outlook', notification: 'status-notification' };
+  const labels = { disabled: '已关闭', starting: '正在启动', running: '运行中', error: '异常，等待重试' };
+  for (const [source, id] of Object.entries(ids)) {
+    const element = document.getElementById(id);
+    const status = sourceStates.states.get(source);
+    const state = status ? status.state : 'starting';
+    element.classList.toggle('active', state === 'running');
+    element.classList.toggle('error', state === 'error');
+    element.dataset.state = state;
+    element.title = status && status.detail ? status.detail : labels[state];
+    element.querySelector('.status-detail').textContent =
+      status && status.detail ? labels[state] + '：' + status.detail : labels[state];
+  }
+}
+
+function editList(field, edit) {
+  if (!currentConfig) return;
+  const items = currentConfig[field].slice();
+  edit(items);
+  configEditor.edit(field, items);
 }
 
 // ===================== Tab 切换 =====================
@@ -145,15 +248,11 @@ function switchTab(name) {
 
 // ===================== 配置 → UI =====================
 function applyConfigToUI(cfg) {
-  // 主页状态
-  setStatus('status-imessage', cfg.listen_imessage);
-  setStatus('status-applemail', cfg.listen_apple_mail);
-  setStatus('status-outlook', cfg.listen_outlook);
-
   // 设置开关
   document.getElementById('cfg-listen-imessage').checked = cfg.listen_imessage;
   document.getElementById('cfg-listen-apple-mail').checked = cfg.listen_apple_mail;
   document.getElementById('cfg-listen-outlook').checked = cfg.listen_outlook;
+  document.getElementById('cfg-listen-notification').checked = cfg.listen_notification;
   document.getElementById('cfg-auto-enter').checked = cfg.auto_enter;
   document.getElementById('cfg-launch-at-login').checked = cfg.launch_at_login;
 
@@ -173,44 +272,35 @@ function applyConfigToUI(cfg) {
   renderSenders();
   renderPatterns();
   renderAutofillApps();
-}
-
-function setStatus(id, active) {
-  var el = document.getElementById(id);
-  if (el) el.classList.toggle('active', active);
+  if (lastPermissions) renderPermissions(lastPermissions);
 }
 
 // ===================== UI → 配置 =====================
 function collectConfigFromUI() {
   if (!currentConfig) return null;
-
-  currentConfig.listen_imessage = document.getElementById('cfg-listen-imessage').checked;
-  currentConfig.listen_apple_mail = document.getElementById('cfg-listen-apple-mail').checked;
-  currentConfig.listen_outlook = document.getElementById('cfg-listen-outlook').checked;
-  currentConfig.auto_enter = document.getElementById('cfg-auto-enter').checked;
-  currentConfig.launch_at_login = document.getElementById('cfg-launch-at-login').checked;
-  currentConfig.autofill_detect_delay_ms = parseInt(document.getElementById('cfg-autofill-delay').value, 10);
-
-  var checked = document.querySelector('input[name="paste_mode"]:checked');
-  if (checked) currentConfig.paste_mode = checked.value;
-
-  return currentConfig;
+  return configEditor.payload();
 }
 
 // ===================== 保存 / 重置 =====================
-function saveConfig() {
+async function saveConfig() {
   var cfg = collectConfigFromUI();
-  if (!cfg || !window.__TAURI__) return;
-
-  window.__TAURI__.core.invoke('update_config', { newConfig: cfg }).then(function () {
-    // 更新主页状态
-    setStatus('status-imessage', cfg.listen_imessage);
-    setStatus('status-applemail', cfg.listen_apple_mail);
-    setStatus('status-outlook', cfg.listen_outlook);
-    showToast();
-  }).catch(function (err) {
-    console.error('保存配置失败:', err);
-  });
+  if (!cfg || !window.__TAURI__ || saveBusy) return;
+  saveBusy = true;
+  document.getElementById('btn-save').disabled = true;
+  try {
+    const saved = await window.__TAURI__.core.invoke('update_config', { newConfig: cfg });
+    currentConfig = configEditor.committed(saved, cfg);
+    applyConfigToUI(currentConfig);
+    await refreshStartupError();
+    showToast(configEditor.dirty.size ? '已保存提交的设置；还有未保存改动' : '设置已保存');
+  } catch (error) {
+    try { receiveConfig(await window.__TAURI__.core.invoke('get_config')); }
+    catch (_) { /* 原始保存错误仍展示，本地改动不会清空。 */ }
+    showError(errorText(error) + '。本地改动已保留，请检查后重新保存。');
+  } finally {
+    saveBusy = false;
+    document.getElementById('btn-save').disabled = false;
+  }
 }
 
 function resetConfig() {
@@ -221,21 +311,31 @@ function resetConfig() {
 
   // 使用内建的默认值
   window.__TAURI__.core.invoke('get_default_config').then(function (cfg) {
-    currentConfig = cfg;
-    applyConfigToUI(cfg);
+    for (const [key, value] of Object.entries(cfg)) configEditor.edit(key, value);
+    currentConfig = configEditor.draft;
+    applyConfigToUI(currentConfig);
     saveConfig();
-  }).catch(function () {
-    // 如果后端没有 get_default_config 命令，提示用户
-    console.warn('get_default_config 命令不可用');
-  });
+  }).catch(showError);
 }
 
-function showToast() {
+function showToast(message = '设置已保存', error = false) {
   var toast = document.getElementById('save-toast');
+  toast.textContent = message;
+  toast.classList.toggle('error', error);
   toast.classList.add('show');
-  setTimeout(function () {
+  clearTimeout(saveToastTimer);
+  saveToastTimer = setTimeout(function () {
     toast.classList.remove('show');
-  }, 2000);
+  }, error ? 8000 : 2500);
+}
+
+function showError(error) {
+  showToast(errorText(error), true);
+}
+
+function showLatestCode() {
+  const value = latestCode.value;
+  showCode(value.code, value.source, value.strategy, value.confidence);
 }
 
 // ===================== 验证码展示 =====================
@@ -243,8 +343,7 @@ function showCode(code, source, strategy, confidence) {
   var display = document.getElementById('code-display');
   display.style.display = 'block';
   document.getElementById('code-value').textContent = code;
-  document.getElementById('code-source').textContent =
-    source + ' · ' + strategy + ' · ' + Math.round(confidence * 100) + '%';
+  document.getElementById('code-source').textContent = source + ' · ' + strategy;
 
   var now = new Date();
   var timeStr = pad(now.getHours()) + ':' + pad(now.getMinutes()) + ':' + pad(now.getSeconds());
@@ -338,21 +437,21 @@ function renderHistory() {
 // ===================== 列表渲染 =====================
 function renderKeywords() {
   renderTagList('keyword-list', currentConfig ? currentConfig.verification_keywords : [], function (idx) {
-    currentConfig.verification_keywords.splice(idx, 1);
+    editList('verification_keywords', function (items) { items.splice(idx, 1); });
     renderKeywords();
   });
 }
 
 function renderSenders() {
   renderTagList('sender-list', currentConfig ? currentConfig.known_2fa_senders : [], function (idx) {
-    currentConfig.known_2fa_senders.splice(idx, 1);
+    editList('known_2fa_senders', function (items) { items.splice(idx, 1); });
     renderSenders();
   });
 }
 
 function renderAutofillApps() {
   renderTagList('autofill-app-list', currentConfig ? currentConfig.native_autofill_apps : [], function (idx) {
-    currentConfig.native_autofill_apps.splice(idx, 1);
+    editList('native_autofill_apps', function (items) { items.splice(idx, 1); });
     renderAutofillApps();
   });
 }
@@ -397,7 +496,7 @@ function renderPatterns() {
     btn.addEventListener('click', function (e) {
       e.stopPropagation();
       var idx = parseInt(btn.getAttribute('data-idx'), 10);
-      currentConfig.verification_patterns.splice(idx, 1);
+      editList('verification_patterns', function (items) { items.splice(idx, 1); });
       renderPatterns();
     });
   });
@@ -447,52 +546,38 @@ function setupDelaySlider() {
   var label = document.getElementById('delay-value');
   slider.addEventListener('input', function () {
     label.textContent = slider.value + 'ms';
+    configEditor.edit('autofill_detect_delay_ms', Number(slider.value));
   });
 }
 
 // ===================== 自动更新 =====================
 async function checkForUpdates(manual = false) {
-  if (!window.__TAURI__) return;
+  if (!window.__TAURI__ || updateBusy) return;
+  updateBusy = true;
+  const button = document.getElementById('btn-check-update');
+  button.disabled = true;
+  button.textContent = '正在检查…';
 
   try {
-    const { check } = window.__TAURI__.updater;
-    const { ask, message } = window.__TAURI__.dialog;
-    const { relaunch } = window.__TAURI__.process;
-
-    const update = await check();
-
-    if (update?.available) {
-      const yes = await ask(
-        `发现新版本 ${update.version}！\n\n当前版本：${update.currentVersion}\n\n是否立即下载并安装？`,
-        {
-          title: 'AutoCode 更新',
-          kind: 'info',
-          okLabel: '立即更新',
-          cancelLabel: '稍后提醒'
-        }
+    const update = await window.__TAURI__.core.invoke('check_update');
+    if (update) {
+      const yes = window.confirm(
+        `发现新版本 ${update.version}\n当前版本：${update.current_version}\n\n${update.notes || ''}\n\n下载并安装已签名更新？`
       );
-
       if (yes) {
-        await update.downloadAndInstall();
-        await relaunch();
+        button.textContent = '正在安装…';
+        await window.__TAURI__.core.invoke('install_update');
+        showToast('更新已安装，请重新打开 AutoCode');
       }
     } else if (manual) {
-      // 手动检查时，如果没有更新也要提示
-      await message('当前已是最新版本！', {
-        title: 'AutoCode 更新',
-        kind: 'info'
-      });
+      showToast('当前已是最新版本');
     }
   } catch (error) {
-    console.log('检查更新失败:', error);
-    if (manual) {
-      // 手动检查时显示错误
-      const { message } = window.__TAURI__.dialog;
-      await message('检查更新失败，请稍后重试', {
-        title: 'AutoCode 更新',
-        kind: 'error'
-      });
-    }
+    if (manual) showError('检查更新失败：' + errorText(error));
+  } finally {
+    updateBusy = false;
+    button.disabled = false;
+    button.textContent = '检查更新';
   }
 }
 
@@ -507,9 +592,12 @@ function esc(text) {
   return d.innerHTML;
 }
 
+// 导出真实控制函数供合成 DOM 回归测试使用，不启动应用或访问个人数据。
+export { initApp, saveConfig, checkForUpdates };
+
 // ===================== 启动 =====================
 if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', initApp);
+  document.addEventListener('DOMContentLoaded', function () { initApp().catch(showError); });
 } else {
-  initApp();
+  initApp().catch(showError);
 }

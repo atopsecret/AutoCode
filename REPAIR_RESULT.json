@@ -1,0 +1,100 @@
+{
+  "version": "0.6.0",
+  "publication_snapshot": "Build verification recorded before source push; GitHub commit and CI records describe later publication state.",
+  "stage": "0.6.0-arm64-release-app-and-zip-built-and-loader-verified",
+  "full_application_build_passed": true,
+  "full_build_blocker": null,
+  "successful_build": {
+    "command": "python3 scripts/build-local.py --offline --bundles app --compile-timeout 1200",
+    "report": "artifacts/build-0.6.0/20261104T131230Z-nynfbtgs/build-report.json",
+    "architecture": "arm64",
+    "app_path": "src-tauri/target/release/bundle/macos/AutoCode.app",
+    "app_zip": "artifacts/build-0.6.0/20261104T131230Z-nynfbtgs/AutoCode_0.6.0_arm64.app.zip",
+    "app_zip_bytes": 8781371,
+    "app_zip_sha256": "aef3fc363b49ea1b2b3f59924f29cd1f57ac7d41b00d59b84533655ad0d3f754",
+    "app_zip_contents_verified": true,
+    "signing": "local ad-hoc; not Developer ID signed or notarized"
+  },
+  "dependency_cache_verification": {
+    "verified_registry_crates_cached": 557,
+    "missing_registry_crates_all_platforms": 0,
+    "invalid_checksums": 0,
+    "checksum_source": "src-tauri/Cargo.lock",
+    "report": "artifacts/build-0.6.0/20261104T131230Z-nynfbtgs/dependency-cache-verification.json"
+  },
+  "dependency_downloads": [
+    { "name": "anstream", "version": "0.6.21", "bytes": 29516, "sha256": "43d5b281e737544384e969a5ccad3f1cdd24b48086a0fc1b2a5262a26b8f4f4a", "cargo_lock_checksum_matched": true, "cargo_cached": true, "retained_download": "artifacts/dependency-downloads/anstream-0.6.21.crate" }
+  ],
+  "bulk_dependency_download": {
+    "historical_attempt": true,
+    "command": "CARGO_NET_RETRY=0 CARGO_HTTP_TIMEOUT=10 cargo fetch --locked --manifest-path src-tauri/Cargo.toml",
+    "completed": false,
+    "exit_code": 101,
+    "verified_registry_crates_cached": 51,
+    "missing_registry_crates_all_platforms": 506,
+    "terminal_error": "Could not resolve host: static.crates.io",
+    "connected_downloader_error": "HTTP 404: no server called chrome-devtools",
+    "network_or_mcp_configuration_changed": false
+  },
+  "tests": {
+    "core": { "passed": 39, "failed": 0 },
+    "ingestion_and_supervisor": { "passed": 16, "failed": 0 },
+    "focus_compilation_and_policy": { "passed": 8, "failed": 0, "note": "Includes seven policy cases also present in core; does not invoke AX or clipboard." },
+    "frontend": { "passed": 17, "failed": 0 },
+    "update_manifest": { "passed": 8, "failed": 0 },
+    "notification_sql": { "passed": 8, "failed": 0, "note": "Six SQL/fixture checks and two explicitly labeled Python behavior models; not a Rust notification integration test." },
+    "build_verifier": { "passed": 45, "failed": 0, "note": "Synthetic fixtures and mocked signing/loader commands; includes signed-but-malformed LINKEDIT and unavailable dyld validator failures." },
+    "build_pipeline": { "passed": 15, "failed": 0, "note": "Synthetic subprocesses and mocked stages; includes release strip policy, failure gating, timeout and SIGTERM/owned-child cleanup." },
+    "full_production_rust_library": { "passed": 61, "failed": 0, "note": "Actual cargo test --lib with locked offline dependencies; overlaps narrow Rust harnesses. Inputs are synthetic fixtures." },
+    "same_original_extractor_bank_before": { "passed": 6, "failed": 5 },
+    "same_original_extractor_bank_after": { "passed": 11, "failed": 0 },
+    "notification_and_imessage_rust_tests": { "executed": true, "passed": 12, "failed": 0, "note": "Included in the 61 production Rust library tests; no real Messages or notification database access." }
+  },
+  "source_format_check_passed": true,
+  "git_diff_whitespace_check_passed": true,
+  "final_regression_log": "artifacts/build-0.6.0/20261104T131230Z-nynfbtgs/regressions.log",
+  "restoration_backup_preserved": { "sha256": "60076ff1f773be71123f01d038298ec84a2e7ea382deae7c35117a535b65e080", "verified": true },
+  "source_only_verification": { "passed": 22, "failed": 0, "report": "artifacts/build-0.6.0/20261104T131230Z-nynfbtgs/source-verification.json", "is_full_build": false },
+  "actual_app_verification": { "passed": true, "checks_passed": 43, "checks_failed": 0, "includes_dyld_loader_validation": true, "report": "artifacts/build-0.6.0/20261104T131230Z-nynfbtgs/app-verification.json" },
+  "loader_fix_before_after": {
+    "before_failed_checks": ["dyld_validate"],
+    "before_report": "artifacts/build-0.6.0/20261104T130704Z-7mna_ixt/after-verifier-upgrade.json",
+    "before_zip_retained_but_not_for_use": true,
+    "after_failed_checks": [],
+    "fix": "Explicit profile.release.strip=none; default release optimization unchanged."
+  },
+  "dmg_packaging": {
+    "created": false,
+    "error": "hdiutil: create failed - 设备未配置; diskutil reports that the DiskManagement framework is unavailable in this execution environment.",
+    "diagnostic_report": "artifacts/build-0.6.0/20261104T130704Z-7mna_ixt/dmg-script-diagnostic.json",
+    "app_and_zip_are_independent": true
+  },
+  "full_build_attempts": [
+    { "command": "cargo tauri build --ci --bundles app -- --offline --locked", "passed": false, "report": "artifacts/build-0.6.0/direct-bundle-attempt/build-report.json" },
+    { "command": "python3 scripts/build-local.py --bundles app --dependency-timeout 35 --compile-timeout 120", "passed": false, "failed_step": "dependencies", "report": "artifacts/build-0.6.0/20261104T113737Z-kvsib274/build-report.json" },
+    { "command": "python3 scripts/build-local.py --offline", "passed": false, "failed_step": "release-bundle", "error": "zerofrom_derive load failure", "report": "artifacts/build-0.6.0/20261104T124808Z-p8qe_3t7/build-report.json", "provided_by_user": true },
+    { "command": "python3 scripts/build-local.py --offline --compile-timeout 1200", "passed": false, "failed_step": "release-bundle", "error": "DMG script failed after App creation", "report": "artifacts/build-0.6.0/20261104T130501Z-4tpozsdp/build-report.json" },
+    { "command": "python3 scripts/build-local.py --offline --bundles app --compile-timeout 180", "passed": false, "failed_step": "post-build-dyld-audit", "original_pipeline_passed_before_validator_upgrade": true, "report": "artifacts/build-0.6.0/20261104T130704Z-7mna_ixt/build-report.json" },
+    { "command": "python3 scripts/build-local.py --offline --bundles app --compile-timeout 1200", "passed": true, "report": "artifacts/build-0.6.0/20261104T131230Z-nynfbtgs/build-report.json" }
+  ],
+  "version_consistency": "Six version values are 0.6.0",
+  "local_tauri_cli_version": "2.10.1",
+  "new_application_artifact_created": true,
+  "local_app_zip_created": true,
+  "update_archive_created": false,
+  "real_app_launched": false,
+  "real_monitor_started": false,
+  "personal_message_bodies_read": false,
+  "installed_app_replaced": false,
+  "installed_app_version": "0.5.0",
+  "github_pushed": false,
+  "ci_triggered": false,
+  "release_key_created": false,
+  "auto_enter": "paused; no global Return events",
+  "remaining_support_limits": [
+    "NSAttributedString typedstream-only Messages records report unsupported encoding rather than guessing.",
+    "MIME charsets other than UTF-8, ASCII and Latin1 report unsupported encoding.",
+    "Unknown service origin or sender domain falls back to a manual-copy popup.",
+    "Real notification schema, AX integration and signed release still require verification."
+  ]
+}

@@ -12,6 +12,13 @@ dist
 dist-ssr
 *.local
 src-tauri/target
+/artifacts/
+__pycache__/
+tests/*-harness/target
+/latest.json
+*.key
+# 本地恢复证据含历史会话路径，不进入公开源码提交。
+/RECOVERY_PROVENANCE.json
 
 # Editor directories and files
 .vscode/*

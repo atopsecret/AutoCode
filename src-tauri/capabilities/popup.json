@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "code-popup",
+  "description": "验证码浮窗只接收本地事件及调用受校验的复制命令",
+  "windows": ["code-popup"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
+  ]
+}

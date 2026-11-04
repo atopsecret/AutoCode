@@ -1,6 +1,6 @@
 [package]
 name = "autocode"
-version = "0.3.1"
+version = "0.6.0"
 description = "AutoCode - Smart 2FA verification code extractor for macOS"
 authors = ["you"]
 edition = "2021"
@@ -15,7 +15,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png", "macos-private-api"] }
 tauri-plugin-opener = "2"
-tauri-plugin-updater = "2"
+tauri-plugin-updater = "=2.10.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
@@ -28,6 +28,12 @@ env_logger = "0.11"
 chrono = { version = "0.4", features = ["serde"] }
 toml = "0.8"
 dirs = "6"
-enigo = "0.3"
 anyhow = "1"
 thiserror = "2"
+plist = "=1.8.0"
+base64 = "=0.22.1"
+
+# 本机符号裁剪会破坏过程宏 dylib 和主程序的 LINKEDIT 字符串池对齐。
+# 明确保留符号；release 优化及构建依赖的默认优化设置仍保持不变。
+[profile.release]
+strip = "none"

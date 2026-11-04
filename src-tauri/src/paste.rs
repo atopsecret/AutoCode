@@ -1,195 +1,183 @@
-use anyhow::Result;
-use log;
-use std::time::Duration;
-use tokio::time;
-
 use crate::clipboard;
-use crate::config::{AppConfig, PasteMode, SharedConfig};
-use crate::extractor::{CodeExtractor, VerificationCode};
+use crate::config::{PasteMode, SharedConfig};
+use crate::delivery::{message_is_fresh, target_matches_sender, DeliveryDeduplicator};
+use crate::extractor::CodeExtractor;
 use crate::monitor::IncomingMessage;
-use tauri::Emitter;
+use crate::monitor::SourceKind;
+use serde::Serialize;
+use std::sync::{Arc, Mutex};
+use tauri::{Emitter, Manager};
 
-/// 智能粘贴决策
-#[derive(Debug)]
-enum PasteDecision {
-    /// 直接自动粘贴
-    AutoPaste,
-    /// 只通知（悬浮窗/通知），不自动粘贴
-    NotifyOnly,
-    /// 等待检测后再决定
-    DelayedCheck {
-        /// 触发延时检测时的前台应用（通常是原生 AutoFill 应用）
-        bundle_id: Option<String>,
-    },
+#[derive(Clone, Serialize)]
+pub struct CodeSnapshot {
+    pub code: String,
+    pub source: String,
+    pub strategy: String,
+    pub confidence: f32,
+    pub sequence: u64,
+    pub expires_at: f64,
+}
+pub type LatestCode = Arc<Mutex<Option<CodeSnapshot>>>;
+
+pub fn now() -> f64 {
+    chrono::Utc::now().timestamp_millis() as f64 / 1000.0
 }
 
-/// 处理传入的消息：提取验证码 → 决策 → 执行粘贴/通知
+fn source_enabled(cfg: &crate::config::AppConfig, kind: SourceKind) -> bool {
+    match kind {
+        SourceKind::Imessage => cfg.listen_imessage,
+        SourceKind::AppleMail => cfg.listen_apple_mail,
+        SourceKind::Outlook => cfg.listen_outlook,
+        SourceKind::Notification => cfg.listen_notification,
+    }
+}
+
+pub fn show_popup(app: &tauri::AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("code-popup") {
+        return window.show().map_err(|e| e.to_string());
+    }
+    tauri::WebviewWindowBuilder::new(
+        app,
+        "code-popup",
+        tauri::WebviewUrl::App("popup.html".into()),
+    )
+    .title("AutoCode 验证码")
+    .inner_size(320.0, 260.0)
+    .resizable(false)
+    .decorations(false)
+    .always_on_top(true)
+    .skip_taskbar(true)
+    .focused(false)
+    .build()
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+async fn copy_only(code: String) {
+    match tokio::task::spawn_blocking(move || clipboard::copy_to_clipboard(&code)).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => log::warn!("复制验证码失败：{e}"),
+        Err(e) => log::warn!("复制任务失败：{e}"),
+    }
+}
+
 pub async fn handle_message(
     msg: IncomingMessage,
     config: &SharedConfig,
     extractor: &CodeExtractor,
-    app_handle: &tauri::AppHandle,
+    app: &tauri::AppHandle,
+    latest: &LatestCode,
+    dedup: &mut DeliveryDeduplicator,
 ) {
-    let cfg = match config.read() {
-        Ok(c) => c.clone(),
-        Err(e) => {
-            log::error!("读取配置失败: {}", e);
+    if !message_is_fresh(msg.received_at, now()) {
+        return;
+    }
+    let Ok(cfg) = config.read().map(|c| c.clone()) else {
+        return;
+    };
+    if !source_enabled(&cfg, msg.kind) {
+        return;
+    }
+    let Some(code) = extractor.extract(&msg.text, msg.sender.as_deref(), &cfg) else {
+        return;
+    };
+    if !dedup.accept(
+        &msg.id,
+        &code.code,
+        msg.sender.as_deref(),
+        &msg.text,
+        msg.received_at,
+        now(),
+    ) {
+        return;
+    }
+
+    let snapshot = {
+        let Ok(mut state) = latest.lock() else {
+            return;
+        };
+        let sequence = state.as_ref().map_or(1, |s| s.sequence.saturating_add(1));
+        let value = CodeSnapshot {
+            code: code.code.clone(),
+            source: msg.source.clone(),
+            strategy: code.source,
+            confidence: code.confidence,
+            sequence,
+            expires_at: msg.received_at + 120.0,
+        };
+        *state = Some(value.clone());
+        value
+    };
+    let _ = app.emit("verification-code", &snapshot);
+
+    match cfg.paste_mode {
+        PasteMode::ClipboardOnly => {
+            copy_only(code.code).await;
+            return;
+        }
+        PasteMode::FloatingOnly => {
+            if let Err(e) = show_popup(app) {
+                log::warn!("显示验证码提示失败：{e}");
+            }
+            return;
+        }
+        _ => {}
+    }
+
+    // 模板等级不能单独授权输入，只有唯一明确的验证码候选才进入焦点校验。
+    if !code.auto_fill_eligible {
+        let _ = show_popup(app);
+        return;
+    }
+    let target = match tokio::task::spawn_blocking(clipboard::capture_focus_target).await {
+        Ok(Ok(target)) => target,
+        _ => {
+            let _ = show_popup(app);
             return;
         }
     };
-
-    // 尝试提取验证码
-    let code = extractor.extract(&msg.text, msg.sender.as_deref(), &cfg);
-
-    let code = match code {
-        Some(c) => c,
-        None => {
-            log::debug!("消息中未发现验证码 (来源: {})", msg.source);
+    if cfg.paste_mode == PasteMode::Smart {
+        if target
+            .bundle_id
+            .as_ref()
+            .is_some_and(|id| cfg.native_autofill_apps.contains(id))
+        {
+            copy_only(code.code).await;
+            let _ = show_popup(app);
             return;
         }
-    };
-
-    log::info!(
-        "发现验证码: {} (来源: {}, 策略: {}, 置信度: {:.0}%)",
-        code.code,
-        msg.source,
-        code.source,
-        code.confidence * 100.0
-    );
-
-    // 通知前端（悬浮窗/通知栏）
-    let _ = app_handle.emit(
-        "verification-code",
-        serde_json::json!({
-            "code": code.code,
-            "source": msg.source,
-            "strategy": code.source,
-            "confidence": code.confidence,
-        }),
-    );
-
-    // 决策并执行粘贴
-    execute_paste(&cfg, &code, &msg.source).await;
-}
-
-/// 根据配置和当前环境决定并执行粘贴操作
-async fn execute_paste(config: &AppConfig, code: &VerificationCode, source: &str) {
-    let decision = make_paste_decision(config, source);
-
-    match decision {
-        PasteDecision::AutoPaste => {
-            do_paste(config, &code.code).await;
-        }
-        PasteDecision::DelayedCheck { bundle_id } => {
-            // Smart 模式：等待一段时间让系统 AutoFill 先工作
-            let delay = Duration::from_millis(config.autofill_detect_delay_ms);
-            log::info!(
-                "Smart 模式：等待 {}ms 检测系统 AutoFill...",
-                config.autofill_detect_delay_ms
-            );
-            time::sleep(delay).await;
-
-            // 延时后仍在原生 AutoFill App 内，优先避免冲突，改为仅复制
-            if let Some(expected_bundle) = bundle_id {
-                let current_bundle = clipboard::get_frontmost_app_bundle_id();
-                if current_bundle.as_deref() == Some(expected_bundle.as_str()) {
-                    log::info!(
-                        "Smart 模式：{} 仍在前台，跳过自动输入避免冲突，改为仅复制",
-                        expected_bundle
-                    );
-                    copy_code_only(&code.code);
-                    return;
-                }
-            }
-
-            do_paste(config, &code.code).await;
-        }
-        PasteDecision::NotifyOnly => {
-            log::info!("仅通知模式：验证码 {} 已发送到前端", code.code);
-            copy_code_only(&code.code);
-        }
+        tokio::time::sleep(std::time::Duration::from_millis(
+            cfg.autofill_detect_delay_ms,
+        ))
+        .await;
     }
-}
-
-/// 粘贴决策逻辑
-fn make_paste_decision(config: &AppConfig, source: &str) -> PasteDecision {
-    match config.paste_mode {
-        PasteMode::Always => PasteDecision::AutoPaste,
-        PasteMode::FloatingOnly | PasteMode::ClipboardOnly => PasteDecision::NotifyOnly,
-        PasteMode::Smart => {
-            // iMessage 来源需要考虑系统 AutoFill 冲突
-            if source == "iMessage" {
-                // 检查当前前台 App 是否有原生 AutoFill 支持
-                if let Some(bundle_id) = clipboard::get_frontmost_app_bundle_id() {
-                    if config
-                        .native_autofill_apps
-                        .iter()
-                        .any(|id| id == &bundle_id)
-                    {
-                        log::info!("当前 App {} 支持原生 AutoFill，使用延时检测", bundle_id);
-                        return PasteDecision::DelayedCheck {
-                            bundle_id: Some(bundle_id),
-                        };
-                    }
-                }
-                // 非原生 App，直接粘贴
-                PasteDecision::AutoPaste
-            } else {
-                // 邮件来源（Apple Mail、Outlook）：系统不支持 AutoFill，直接粘贴
-                PasteDecision::AutoPaste
-            }
-        }
+    if !target_matches_sender(msg.sender.as_deref(), target.origin_host.as_deref()) {
+        let _ = show_popup(app);
+        return;
     }
-}
-
-/// 仅复制验证码到剪贴板
-fn copy_code_only(code: &str) {
-    if let Err(e) = clipboard::copy_to_clipboard(code) {
-        log::error!("复制到剪贴板失败: {}", e);
-    } else {
-        log::info!("验证码已复制到剪贴板");
+    // 等待中改变模式、关闭来源或保存设置，取消旧的待执行输入。
+    if !message_is_fresh(msg.received_at, now())
+        || !config.read().is_ok_and(|c| c.revision == cfg.revision)
+    {
+        return;
     }
-}
-
-/// 执行实际的粘贴操作
-async fn do_paste(config: &AppConfig, code: &str) {
-    // 使用 blocking task 执行键盘操作（避免阻塞 tokio）
-    let code = code.to_string();
-    let auto_enter = config.auto_enter;
-
-    let result = tokio::task::spawn_blocking(move || -> Result<()> {
-        // 先复制到剪贴板（作为保底，即使键盘输入失败用户也能手动粘贴）
-        if let Err(e) = clipboard::copy_to_clipboard(&code) {
-            log::warn!("复制到剪贴板失败: {}", e);
-        }
-
-        // 尝试直接键盘输入（需要 Accessibility 权限）
-        match clipboard::type_text(&code) {
-            Ok(()) => {
-                log::info!("已自动输入验证码: {}", code);
-
-                if auto_enter {
-                    if let Err(e) = clipboard::press_enter() {
-                        log::warn!("自动回车失败: {}", e);
-                    } else {
-                        log::info!("已自动按下回车");
-                    }
-                }
-            }
-            Err(e) => {
-                // Accessibility 权限不足，回退到仅复制模式
-                log::warn!("键盘输入失败（可能缺少辅助功能权限）: {}", e);
-                log::info!("验证码已复制到剪贴板，请手动 Cmd+V 粘贴");
-            }
-        }
-
-        Ok(())
+    let value = code.code.clone();
+    let config_for_fill = config.clone();
+    let kind = msg.kind;
+    let revision = cfg.revision;
+    let result = tokio::task::spawn_blocking(move || {
+        let current = config_for_fill
+            .read()
+            .map_err(|_| anyhow::anyhow!("配置锁不可用"))?;
+        anyhow::ensure!(
+            current.revision == revision && source_enabled(&current, kind),
+            "设置已变化，取消待执行输入"
+        );
+        clipboard::fill_verified_target(&target, &value)
     })
     .await;
-
-    match result {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => log::error!("粘贴操作失败: {}", e),
-        Err(e) => log::error!("粘贴任务 panic: {}", e),
+    if !matches!(result, Ok(Ok(()))) {
+        let _ = show_popup(app);
     }
+    // 不发送全局 Return。没有可验证的同服务提交目标时，自动回车必须暂停。
 }

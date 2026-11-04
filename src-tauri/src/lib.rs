@@ -1,336 +1,422 @@
 mod autostart;
 mod clipboard;
 mod config;
+mod delivery;
 mod extractor;
 mod monitor;
 mod paste;
 mod permissions;
 
-use config::{load_shared_config, AppConfig, SharedConfig};
-use extractor::CodeExtractor;
-use monitor::MonitorCommand;
-use std::sync::Arc;
+use config::{load_shared_config, AppConfig, PasteMode, SharedConfig};
+use monitor::{MonitorCommand, SharedStatus, SourceKind, SourceStatus};
+use paste::{CodeSnapshot, LatestCode};
+use std::sync::{Arc, Mutex, RwLock};
 use tauri::{Emitter, Manager};
+use tauri_plugin_updater::UpdaterExt;
 
-/// 全局监控控制器（用于动态启停监控源）
 struct MonitorController {
     cmd_tx: monitor::CommandSender,
+    status: SharedStatus,
 }
-
-/// 托盘可勾选菜单项句柄
+struct StartupError(Mutex<Option<String>>);
+struct PendingUpdate(tokio::sync::Mutex<Option<tauri_plugin_updater::Update>>);
 struct TrayMenuState {
-    listen_imessage: tauri::menu::CheckMenuItem<tauri::Wry>,
-    listen_apple_mail: tauri::menu::CheckMenuItem<tauri::Wry>,
-    listen_outlook: tauri::menu::CheckMenuItem<tauri::Wry>,
-    auto_enter: tauri::menu::CheckMenuItem<tauri::Wry>,
+    sources: Vec<(SourceKind, tauri::menu::CheckMenuItem<tauri::Wry>)>,
 }
 
-/// Tauri 命令：获取当前配置
-#[tauri::command]
-fn get_config(state: tauri::State<SharedConfig>) -> Result<AppConfig, String> {
-    let config = state.read().map_err(|e| format!("读取配置失败: {}", e))?;
-    Ok(config.clone())
+fn desired_sources(cfg: &AppConfig) -> [bool; 4] {
+    [
+        cfg.listen_imessage,
+        cfg.listen_apple_mail,
+        cfg.listen_outlook,
+        cfg.listen_notification,
+    ]
 }
 
-/// Tauri 命令：更新配置
-#[tauri::command]
-fn update_config(
-    state: tauri::State<SharedConfig>,
-    monitor: tauri::State<MonitorController>,
-    tray: tauri::State<TrayMenuState>,
-    new_config: AppConfig,
-) -> Result<(), String> {
-    let old_config = {
-        let cfg = state.read().map_err(|e| format!("读取配置失败: {}", e))?;
-        cfg.clone()
-    };
-
-    // 同步开机自启状态
-    if let Err(e) = autostart::set_enabled(new_config.launch_at_login) {
-        log::warn!("设置开机自启失败: {}", e);
+fn main_window_only(window: &tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("此操作只能从设置窗口发起".into());
     }
-
-    new_config
-        .save()
-        .map_err(|e| format!("保存配置失败: {}", e))?;
-    {
-        let mut config = state.write().map_err(|e| format!("写入配置失败: {}", e))?;
-        *config = new_config.clone();
-    }
-
-    // 实时同步监控源启停（无需重启）
-    sync_monitor_sources(&monitor.cmd_tx, &old_config, &new_config);
-    // 同步托盘勾选状态（前端改配置后立即刷新）
-    sync_tray_menu_state(&tray, &new_config);
     Ok(())
 }
 
-/// Tauri 命令：获取默认配置
+#[tauri::command]
+fn get_config(state: tauri::State<SharedConfig>) -> Result<AppConfig, String> {
+    state
+        .read()
+        .map(|s| s.clone())
+        .map_err(|e| format!("读取配置失败：{e}"))
+}
 #[tauri::command]
 fn get_default_config() -> AppConfig {
     AppConfig::default()
 }
-
-/// Tauri 命令：获取版本信息
 #[tauri::command]
 fn get_version() -> String {
-    env!("CARGO_PKG_VERSION").to_string()
+    env!("CARGO_PKG_VERSION").into()
 }
-
-/// Tauri 命令：检查权限状态
 #[tauri::command]
-fn check_permissions() -> permissions::PermissionStatus {
-    permissions::check_all()
+fn get_startup_error(state: tauri::State<StartupError>) -> Option<String> {
+    state.0.lock().ok()?.clone()
 }
 
-/// Tauri 命令：打开完全磁盘访问设置
-#[tauri::command]
-fn open_fda_settings() -> Result<(), String> {
-    permissions::open_full_disk_access_settings().map_err(|e| format!("打开设置失败: {}", e))
-}
-
-/// Tauri 命令：打开辅助功能设置
-#[tauri::command]
-fn open_accessibility_settings() -> Result<(), String> {
-    permissions::open_accessibility_settings().map_err(|e| format!("打开设置失败: {}", e))
-}
-
-/// 显示/创建主窗口
-fn show_main_window(app: &tauri::AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.set_focus();
-    }
-}
-
-/// 显示主窗口并切换到设置页
-fn show_settings(app: &tauri::AppHandle) {
-    show_main_window(app);
-    let _ = app.emit("navigate", "settings");
-}
-
-/// 发送监控命令（非阻塞）
-fn send_monitor_command(cmd_tx: &monitor::CommandSender, cmd: MonitorCommand) {
-    let cmd_name = match &cmd {
-        MonitorCommand::StartImessage => "StartImessage",
-        MonitorCommand::StopImessage => "StopImessage",
-        MonitorCommand::StartAppleMail => "StartAppleMail",
-        MonitorCommand::StopAppleMail => "StopAppleMail",
-        MonitorCommand::StartOutlook => "StartOutlook",
-        MonitorCommand::StopOutlook => "StopOutlook",
-        MonitorCommand::Shutdown => "Shutdown",
-    };
-
-    if let Err(e) = cmd_tx.try_send(cmd) {
-        log::warn!("发送监控命令 {} 失败: {}", cmd_name, e);
-    }
-}
-
-/// 根据配置差异同步监控源
-fn sync_monitor_sources(cmd_tx: &monitor::CommandSender, old: &AppConfig, new: &AppConfig) {
-    if old.listen_imessage != new.listen_imessage {
-        if new.listen_imessage {
-            send_monitor_command(cmd_tx, MonitorCommand::StartImessage);
-        } else {
-            send_monitor_command(cmd_tx, MonitorCommand::StopImessage);
-        }
-    }
-
-    if old.listen_apple_mail != new.listen_apple_mail {
-        if new.listen_apple_mail {
-            send_monitor_command(cmd_tx, MonitorCommand::StartAppleMail);
-        } else {
-            send_monitor_command(cmd_tx, MonitorCommand::StopAppleMail);
-        }
-    }
-
-    if old.listen_outlook != new.listen_outlook {
-        if new.listen_outlook {
-            send_monitor_command(cmd_tx, MonitorCommand::StartOutlook);
-        } else {
-            send_monitor_command(cmd_tx, MonitorCommand::StopOutlook);
-        }
-    }
-}
-
-/// 根据当前配置启动监控源（应用启动时）
-fn start_enabled_sources(cmd_tx: &monitor::CommandSender, cfg: &AppConfig) {
-    if cfg.listen_imessage {
-        send_monitor_command(cmd_tx, MonitorCommand::StartImessage);
-    }
-    if cfg.listen_apple_mail {
-        send_monitor_command(cmd_tx, MonitorCommand::StartAppleMail);
-    }
-    if cfg.listen_outlook {
-        send_monitor_command(cmd_tx, MonitorCommand::StartOutlook);
-    }
-}
-
-fn set_checked(item: &tauri::menu::CheckMenuItem<tauri::Wry>, checked: bool, name: &str) {
-    if let Err(e) = item.set_checked(checked) {
-        log::warn!("更新托盘菜单 '{}' 失败: {}", name, e);
-    }
-}
-
-fn sync_tray_menu_state(tray: &TrayMenuState, cfg: &AppConfig) {
-    set_checked(
-        &tray.listen_imessage,
-        cfg.listen_imessage,
-        "listen_imessage",
-    );
-    set_checked(
-        &tray.listen_apple_mail,
-        cfg.listen_apple_mail,
-        "listen_apple_mail",
-    );
-    set_checked(&tray.listen_outlook, cfg.listen_outlook, "listen_outlook");
-    set_checked(&tray.auto_enter, cfg.auto_enter, "auto_enter");
-}
-
-enum TraySource {
-    Imessage,
-    AppleMail,
-    Outlook,
-}
-
-/// 托盘中切换监控源并持久化配置
-fn toggle_source_from_tray(app: &tauri::AppHandle, source: TraySource) {
-    let config_state = app.state::<SharedConfig>();
+fn persist_config(app: &tauri::AppHandle, mut new: AppConfig) -> Result<AppConfig, String> {
+    new.validate().map_err(|e| e.to_string())?;
+    let state = app.state::<SharedConfig>();
     let monitor = app.state::<MonitorController>();
-    let tray = app.state::<TrayMenuState>();
-
-    let (old_cfg, new_cfg, enabled) = {
-        let mut cfg = match config_state.write() {
-            Ok(c) => c,
-            Err(e) => {
-                log::error!("获取配置锁失败: {}", e);
-                return;
-            }
-        };
-        let old = cfg.clone();
-        let enabled = match source {
-            TraySource::Imessage => {
-                cfg.listen_imessage = !cfg.listen_imessage;
-                cfg.listen_imessage
-            }
-            TraySource::AppleMail => {
-                cfg.listen_apple_mail = !cfg.listen_apple_mail;
-                cfg.listen_apple_mail
-            }
-            TraySource::Outlook => {
-                cfg.listen_outlook = !cfg.listen_outlook;
-                cfg.listen_outlook
-            }
-        };
-        let new = cfg.clone();
-        (old, new, enabled)
-    };
-
-    sync_monitor_sources(&monitor.cmd_tx, &old_cfg, &new_cfg);
-    sync_tray_menu_state(&tray, &new_cfg);
-    if let Err(e) = new_cfg.save() {
-        log::error!("保存配置失败: {}", e);
+    let mut old = state.write().map_err(|e| format!("读取配置失败：{e}"))?;
+    if new.revision != old.revision {
+        return Err("配置已被其他窗口或托盘修改，请刷新后重新保存".into());
     }
-    let source_name = match source {
-        TraySource::Imessage => "iMessage",
-        TraySource::AppleMail => "Apple Mail",
-        TraySource::Outlook => "Spotlight 邮件",
-    };
-    log::info!("{} 监听状态: {}", source_name, enabled);
+    // 提前确认命令队列可接收，防止磁盘保存成功却静默丢掉启停操作。
+    let permit = monitor
+        .cmd_tx
+        .try_reserve()
+        .map_err(|e| format!("监控控制器暂不可用：{e}"))?;
+    new.revision = old.revision.checked_add(1).ok_or("配置版本超出范围")?;
+    let autostart_changed = new.launch_at_login != old.launch_at_login;
+    if autostart_changed {
+        autostart::set_enabled(new.launch_at_login)
+            .map_err(|e| format!("设置开机自启失败：{e}"))?;
+    }
+    if let Err(e) = new.save() {
+        if autostart_changed {
+            if let Err(rollback) = autostart::set_enabled(old.launch_at_login) {
+                return Err(format!("保存失败：{e}；恢复自启状态也失败：{rollback}"));
+            }
+        }
+        return Err(format!("保存配置失败：{e}"));
+    }
+    *old = new.clone();
+    permit.send(MonitorCommand::Reconcile {
+        enabled: desired_sources(&new),
+        retry_errors: true,
+    });
+    drop(old);
+    sync_tray(app, &new);
+    let _ = app.emit("config-changed", &new);
+    if let Ok(mut error) = app.state::<StartupError>().0.lock() {
+        *error = None;
+    }
+    let _ = app.emit("startup-error", Option::<String>::None);
+    Ok(new)
 }
 
-/// 托盘中切换自动回车并持久化配置
-fn toggle_auto_enter_from_tray(app: &tauri::AppHandle) {
-    let config_state = app.state::<SharedConfig>();
-    let tray = app.state::<TrayMenuState>();
-    let cfg = {
-        let mut cfg = match config_state.write() {
-            Ok(c) => c,
-            Err(e) => {
-                log::error!("获取配置锁失败: {}", e);
-                return;
-            }
-        };
-        cfg.auto_enter = !cfg.auto_enter;
-        if let Err(e) = cfg.save() {
-            log::error!("保存配置失败: {}", e);
+#[tauri::command]
+fn update_config(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    new_config: AppConfig,
+) -> Result<AppConfig, String> {
+    main_window_only(&window)?;
+    persist_config(&app, new_config)
+}
+
+#[tauri::command]
+fn get_monitor_status(state: tauri::State<MonitorController>) -> Result<Vec<SourceStatus>, String> {
+    state
+        .status
+        .lock()
+        .map(|s| s.values().cloned().collect())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn check_permissions(
+    state: tauri::State<SharedConfig>,
+    monitor: tauri::State<MonitorController>,
+) -> Result<permissions::PermissionStatus, String> {
+    let cfg = state.read().map_err(|e| e.to_string())?;
+    monitor
+        .cmd_tx
+        .try_send(MonitorCommand::Reconcile {
+            enabled: desired_sources(&cfg),
+            retry_errors: true,
+        })
+        .map_err(|e| format!("恢复监控失败：{e}"))?;
+    let statuses = monitor
+        .status
+        .lock()
+        .map_err(|e| e.to_string())?
+        .values()
+        .cloned()
+        .collect();
+    Ok(permissions::check_all(statuses))
+}
+#[tauri::command]
+fn open_fda_settings(window: tauri::WebviewWindow) -> Result<(), String> {
+    main_window_only(&window)?;
+    permissions::open_full_disk_access_settings().map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn open_accessibility_settings(window: tauri::WebviewWindow) -> Result<(), String> {
+    main_window_only(&window)?;
+    permissions::open_accessibility_settings().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_latest_code(state: tauri::State<LatestCode>) -> Option<CodeSnapshot> {
+    state
+        .lock()
+        .ok()?
+        .as_ref()
+        .filter(|s| s.expires_at > paste::now())
+        .cloned()
+}
+#[tauri::command]
+async fn copy_verified_code(
+    state: tauri::State<'_, LatestCode>,
+    code: String,
+) -> Result<(), String> {
+    let allowed = state
+        .lock()
+        .map_err(|e| e.to_string())?
+        .as_ref()
+        .is_some_and(|s| s.code == code && s.expires_at > paste::now());
+    if !allowed {
+        return Err("验证码已过期或已被新验证码替代".into());
+    }
+    let latest = state.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let current = latest
+            .lock()
+            .map_err(|_| anyhow::anyhow!("验证码状态不可用"))?;
+        anyhow::ensure!(
+            current
+                .as_ref()
+                .is_some_and(|s| s.code == code && s.expires_at > paste::now()),
+            "验证码已过期或已被替代"
+        );
+        clipboard::copy_to_clipboard(&code)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn dismiss_popup(app: tauri::AppHandle) -> Result<(), String> {
+    if let Some(w) = app.get_webview_window("code-popup") {
+        w.hide().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+struct UpdateMetadata {
+    version: String,
+    current_version: String,
+    notes: Option<String>,
+}
+
+fn require_update_key(app: &tauri::AppHandle) -> Result<(), String> {
+    let key = app
+        .config()
+        .plugins
+        .0
+        .get("updater")
+        .and_then(|v| v.get("pubkey"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if key.trim().is_empty() {
+        return Err(
+            "尚未配置签名更新。请使用已验证的正式安装包；不会下载或安装未签名更新。".into(),
+        );
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn check_update(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    pending: tauri::State<'_, PendingUpdate>,
+) -> Result<Option<UpdateMetadata>, String> {
+    main_window_only(&window)?;
+    let mut cached = pending.0.lock().await;
+    *cached = None;
+    require_update_key(&app)?;
+    let mut update = app
+        .updater_builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?
+        .check()
+        .await
+        .map_err(|e| e.to_string())?;
+    if let Some(u) = update.as_mut() {
+        if u.signature.trim().is_empty() || u.download_url.scheme() != "https" {
+            return Err("更新缺少签名或没有使用 HTTPS".into());
         }
-        cfg.clone()
+        u.timeout = Some(std::time::Duration::from_secs(60));
+    }
+    let metadata = update.as_ref().map(|u| UpdateMetadata {
+        version: u.version.clone(),
+        current_version: u.current_version.clone(),
+        notes: u.body.clone(),
+    });
+    *cached = update;
+    Ok(metadata)
+}
+
+#[tauri::command]
+async fn install_update(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    pending: tauri::State<'_, PendingUpdate>,
+) -> Result<(), String> {
+    main_window_only(&window)?;
+    require_update_key(&app)?;
+    let mut cached = pending.0.lock().await;
+    let update = cached.take().ok_or("没有已检查的更新，请先检查更新")?;
+    // 缓存的是已确认版本/URL/签名，不根据安装命令中的用户字符串切换下载目标。
+    // 官方 download_and_install 先验公钥签名再安装；不允许关闭验证。
+    update
+        .download_and_install(|_, _| {}, || {})
+        .await
+        .map_err(|e| e.to_string())?;
+    drop(cached);
+    app.restart();
+}
+
+fn sync_tray(app: &tauri::AppHandle, cfg: &AppConfig) {
+    if let Some(tray) = app.try_state::<TrayMenuState>() {
+        let desired = desired_sources(cfg);
+        for ((_, item), enabled) in tray.sources.iter().zip(desired) {
+            if let Err(e) = item.set_checked(enabled) {
+                log::warn!("刷新托盘失败：{e}");
+            }
+        }
+    }
+}
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+}
+
+fn toggle_source(app: &tauri::AppHandle, kind: SourceKind) {
+    let state = app.state::<SharedConfig>();
+    let Ok(mut cfg) = state.read().map(|s| s.clone()) else {
+        return;
     };
-    sync_tray_menu_state(&tray, &cfg);
-    log::info!("自动回车: {}", cfg.auto_enter);
+    match kind {
+        SourceKind::Imessage => cfg.listen_imessage = !cfg.listen_imessage,
+        SourceKind::AppleMail => cfg.listen_apple_mail = !cfg.listen_apple_mail,
+        SourceKind::Outlook => cfg.listen_outlook = !cfg.listen_outlook,
+        SourceKind::Notification => cfg.listen_notification = !cfg.listen_notification,
+    }
+    if let Err(e) = persist_config(app, cfg) {
+        let _ = app.emit("app-error", &e);
+        show_main_window(app);
+        if let Ok(cfg) = state.read() {
+            sync_tray(app, &cfg);
+        }
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // 初始化日志
     env_logger::Builder::from_default_env()
         .filter_level(log::LevelFilter::Info)
         .init();
-
-    log::info!("=== AutoCode v{} ===", env!("CARGO_PKG_VERSION"));
-
-    // 加载配置
-    let shared_config = match load_shared_config() {
-        Ok(c) => c,
+    let (shared, startup_error) = match load_shared_config() {
+        Ok(config) => (config, None),
         Err(e) => {
-            log::error!("加载配置失败: {}", e);
-            Arc::new(std::sync::RwLock::new(AppConfig::default()))
+            let detail = format!("配置加载失败，所有监控已暂停，原配置未被覆盖：{e:#}");
+            let mut cfg = AppConfig::default();
+            cfg.listen_imessage = false;
+            cfg.listen_apple_mail = false;
+            cfg.listen_outlook = false;
+            cfg.listen_notification = false;
+            cfg.paste_mode = PasteMode::FloatingOnly;
+            (Arc::new(RwLock::new(cfg)), Some(detail))
         }
     };
-
-    // 同步开机自启状态：以 LaunchAgent 是否存在为准
-    {
-        if let Ok(mut cfg) = shared_config.write() {
-            cfg.launch_at_login = autostart::is_enabled();
-        } else {
-            log::error!("获取配置锁失败，跳过开机自启状态同步");
-        }
+    if let Ok(mut cfg) = shared.write() {
+        cfg.launch_at_login = autostart::is_enabled();
     }
-
-    let config_for_setup = shared_config.clone();
-
+    let latest: LatestCode = Arc::new(Mutex::new(None));
+    let latest_for_setup = latest.clone();
+    let config_for_setup = shared.clone();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .manage(shared_config.clone())
+        .manage(shared)
+        .manage(latest)
+        .manage(StartupError(Mutex::new(startup_error)))
+        .manage(PendingUpdate(tokio::sync::Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             get_config,
             update_config,
             get_default_config,
             get_version,
+            get_startup_error,
+            get_monitor_status,
             check_permissions,
             open_fda_settings,
-            open_accessibility_settings
+            open_accessibility_settings,
+            get_latest_code,
+            copy_verified_code,
+            dismiss_popup,
+            check_update,
+            install_update
         ])
         .setup(move |app| {
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             let app_handle = app.handle().clone();
             let config = config_for_setup.clone();
+            let latest = latest_for_setup.clone();
             let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
-
-            // 在后台启动 tokio 运行时和监控系统
             std::thread::spawn(move || {
-                let rt = tokio::runtime::Runtime::new().unwrap();
+                let Ok(rt) = tokio::runtime::Runtime::new() else {
+                    return;
+                };
                 rt.block_on(async move {
-                    start_monitoring(app_handle, config, ready_tx).await;
+                    let (cmd_tx, mut messages, status, mut status_rx) = monitor::start_monitor();
+                    let _ = ready_tx.send(MonitorController {
+                        cmd_tx: cmd_tx.clone(),
+                        status,
+                    });
+                    let event_app = app_handle.clone();
+                    tokio::spawn(async move {
+                        while let Some(status) = status_rx.recv().await {
+                            let _ = event_app.emit("monitor-status", status);
+                        }
+                    });
+                    if let Ok(cfg) = config.read() {
+                        let _ = cmd_tx.try_send(MonitorCommand::Reconcile {
+                            enabled: desired_sources(&cfg),
+                            retry_errors: false,
+                        });
+                    }
+                    let extractor = extractor::CodeExtractor::new();
+                    let mut dedup = delivery::DeliveryDeduplicator::default();
+                    while let Some(msg) = messages.recv().await {
+                        paste::handle_message(
+                            msg,
+                            &config,
+                            &extractor,
+                            &app_handle,
+                            &latest,
+                            &mut dedup,
+                        )
+                        .await;
+                    }
                 });
             });
-
-            // 等待监控系统就绪并注入全局状态
-            let cmd_tx = ready_rx
-                .recv()
-                .map_err(|e| format!("监控系统初始化失败: {}", e))?;
-            app.manage(MonitorController { cmd_tx });
-
-            // 设置系统托盘（Tauri v2 方式）
+            let controller = ready_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .map_err(|e| format!("监控系统初始化失败：{e}"))?;
+            app.manage(controller);
             setup_tray(app)?;
-
             Ok(())
         })
-        .on_window_event(|window, event| {
-            // 拦截窗口关闭事件，隐藏窗口而不是退出程序
+        .on_window_event(|w, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                window.hide().unwrap();
+                let _ = w.hide();
                 api.prevent_close();
             }
         })
@@ -338,155 +424,78 @@ pub fn run() {
         .expect("AutoCode 启动失败");
 }
 
-/// 启动监控系统
-async fn start_monitoring(
-    app_handle: tauri::AppHandle,
-    config: SharedConfig,
-    ready_tx: std::sync::mpsc::SyncSender<monitor::CommandSender>,
-) {
-    let (cmd_tx, mut msg_rx) = monitor::start_monitor();
-    let _ = ready_tx.send(cmd_tx.clone());
-
-    // 读取配置并启动对应的监控源
-    {
-        let cfg = match config.read() {
-            Ok(c) => c,
-            Err(e) => {
-                log::error!("读取配置失败: {}", e);
-                return;
-            }
-        };
-        start_enabled_sources(&cmd_tx, &cfg);
-    }
-
-    // 创建提取引擎
-    let extractor = CodeExtractor::new();
-
-    // 消息处理循环
-    while let Some(msg) = msg_rx.recv().await {
-        paste::handle_message(msg, &config, &extractor, &app_handle).await;
-    }
-}
-
-/// 设置系统托盘
 fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     use tauri::{
         menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem},
         tray::TrayIconBuilder,
     };
-
-    let config = app.state::<SharedConfig>();
-    let cfg = match config.read() {
-        Ok(c) => c,
-        Err(e) => {
-            log::error!("读取配置失败: {}", e);
-            return Err("读取配置失败".into());
-        }
-    };
-
-    // 创建菜单项
-    let listen_imessage = CheckMenuItem::with_id(
+    let state = app.state::<SharedConfig>();
+    let cfg = state.read().map_err(|e| e.to_string())?;
+    let source_items = [
+        (SourceKind::Imessage, "listen_imessage", "监听 iMessage"),
+        (
+            SourceKind::AppleMail,
+            "listen_apple_mail",
+            "监听 Apple Mail",
+        ),
+        (SourceKind::Outlook, "listen_outlook", "监听 Spotlight 邮件"),
+        (
+            SourceKind::Notification,
+            "listen_notification",
+            "监听邮件通知",
+        ),
+    ];
+    let menu = Menu::new(app)?;
+    let mut sources = Vec::new();
+    for ((kind, id, label), enabled) in source_items.into_iter().zip(desired_sources(&cfg)) {
+        let item = CheckMenuItem::with_id(app, id, label, true, enabled, None::<&str>)?;
+        menu.append(&item)?;
+        sources.push((kind, item));
+    }
+    menu.append(&PredefinedMenuItem::separator(app)?)?;
+    menu.append(&MenuItem::with_id(
         app,
-        "listen_imessage",
-        "监听 iMessage",
+        "settings",
+        "设置…",
         true,
-        cfg.listen_imessage,
         None::<&str>,
-    )?;
-    let listen_apple_mail = CheckMenuItem::with_id(
-        app,
-        "listen_apple_mail",
-        "监听 Apple Mail",
-        true,
-        cfg.listen_apple_mail,
-        None::<&str>,
-    )?;
-    let listen_outlook = CheckMenuItem::with_id(
-        app,
-        "listen_outlook",
-        "监听 Spotlight 邮件",
-        true,
-        cfg.listen_outlook,
-        None::<&str>,
-    )?;
-    let auto_enter = CheckMenuItem::with_id(
-        app,
-        "auto_enter",
-        "自动回车",
-        true,
-        cfg.auto_enter,
-        None::<&str>,
-    )?;
-
-    let separator = PredefinedMenuItem::separator(app)?;
-    let settings = MenuItem::with_id(app, "settings", "设置...", true, None::<&str>)?;
-    let about = MenuItem::with_id(
+    )?)?;
+    menu.append(&MenuItem::with_id(
         app,
         "about",
-        &format!("关于 AutoCode v{}", env!("CARGO_PKG_VERSION")),
+        format!("关于 AutoCode v{}", env!("CARGO_PKG_VERSION")),
         true,
         None::<&str>,
-    )?;
-    let quit = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-
-    let menu = Menu::with_items(
-        app,
-        &[
-            &listen_imessage,
-            &listen_apple_mail,
-            &listen_outlook,
-            &auto_enter,
-            &separator,
-            &settings,
-            &about,
-            &quit,
-        ],
-    )?;
-
-    let icon_bytes = include_bytes!("../icons/tray-icon.png");
-    let icon = tauri::image::Image::from_bytes(icon_bytes)?;
-
-    app.manage(TrayMenuState {
-        listen_imessage: listen_imessage.clone(),
-        listen_apple_mail: listen_apple_mail.clone(),
-        listen_outlook: listen_outlook.clone(),
-        auto_enter: auto_enter.clone(),
-    });
-
-    let _tray = TrayIconBuilder::new()
+    )?)?;
+    menu.append(&MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?)?;
+    drop(cfg);
+    app.manage(TrayMenuState { sources });
+    let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray-icon.png"))?;
+    TrayIconBuilder::new()
         .icon(icon)
         .icon_as_template(true)
         .menu(&menu)
         .show_menu_on_left_click(true)
-        .tooltip("AutoCode - 验证码自动提取")
-        .on_menu_event(move |app, event| match event.id().as_ref() {
+        .tooltip("AutoCode - 验证码提取")
+        .on_menu_event(|app, event| match event.id().as_ref() {
             "quit" => {
-                log::info!("用户退出 AutoCode");
+                let _ = app
+                    .state::<MonitorController>()
+                    .cmd_tx
+                    .try_send(MonitorCommand::Shutdown);
                 app.exit(0);
             }
             "settings" => {
-                log::info!("打开设置窗口");
-                show_settings(app);
-            }
-            "about" => {
-                log::info!("显示主窗口");
                 show_main_window(app);
+                let _ = app.emit("navigate", "settings");
             }
-            "listen_imessage" => {
-                toggle_source_from_tray(app, TraySource::Imessage);
-            }
-            "listen_apple_mail" => {
-                toggle_source_from_tray(app, TraySource::AppleMail);
-            }
-            "listen_outlook" => {
-                toggle_source_from_tray(app, TraySource::Outlook);
-            }
-            "auto_enter" => {
-                toggle_auto_enter_from_tray(app);
-            }
+            "about" => show_main_window(app),
+            "listen_imessage" => toggle_source(app, SourceKind::Imessage),
+            "listen_apple_mail" => toggle_source(app, SourceKind::AppleMail),
+            "listen_outlook" => toggle_source(app, SourceKind::Outlook),
+            "listen_notification" => toggle_source(app, SourceKind::Notification),
             _ => {}
         })
         .build(app)?;
-
     Ok(())
 }

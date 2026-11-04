@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="popup.css" />
+    <title>AutoCode 验证码</title>
+  </head>
+  <body>
+    <main class="popup-card">
+      <header>
+        <span>AutoCode · 验证码</span>
+        <button id="dismiss" class="dismiss" type="button" aria-label="关闭提示">×</button>
+      </header>
+      <div id="popup-code" class="popup-code">等待验证码</div>
+      <div id="popup-source" class="popup-source"></div>
+      <button id="popup-copy" class="copy" type="button" disabled>复制验证码</button>
+      <p id="popup-message" role="status" aria-live="polite">点击复制，不会自动输入或回车。</p>
+    </main>
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

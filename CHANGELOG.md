@@ -5,6 +5,50 @@ All notable changes to AutoCode will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - Unreleased
+
+- 修复通知路径、schema/plist 解析、分页及失败游标处理。
+- 各来源独立状态、授权恢复、退避重试和 panic 监督。
+- 加入消息身份、接收时间、跨源去重和迟到旧码保护。
+- 修复订单误识别、白名单后缀冒名、超长数字截取、大小写和多候选歧义。
+- 自动填入改为定向 AX 元素写入，检查验证码字段、服务与焦点；暂停全局回车。
+- 加入独立通知开关、真实浮窗、配置 revision 和保存错误反馈。
+- 更新改用 Rust 后端和签名产物；空公钥拒绝安装，历史假签名清单移为 fixture。
+- 新增离线回归测试及 macOS 完整构建 CI。构建与真机验证范围见 REPAIR_NOTES.md。
+- 版本统一为 0.6.0；补齐锁定依赖的完整构建入口、App/DMG/ZIP 校验与失败/取消清理，CI 改为构建最终 App。
+- 调整验证码浮窗高度，给复制按钮与状态说明留出空间。
+- 修复 macOS release 符号裁剪导致的过程宏和主程序 LINKEDIT 对齐错误；产物验证新增 dyld 加载布局检查，避免把签名有效但无法加载的 App 当成通过。
+
+## [0.5.0] - 2026-03-06
+
+### ✨ Added
+- **通知监控支持**：新增系统通知监控功能，支持新版 Microsoft Outlook 和所有邮件客户端
+- **多源监控**：同时监控 Spotlight 文件和系统通知，确保最大兼容性
+
+### 🔧 Fixed
+- **Outlook 兼容性**：解决新版 Outlook 使用数据库存储导致无法监控的问题
+
+## [0.4.2] - 2026-03-06
+
+### ✨ Added
+- **版本信息显示**：设置页面显示当前版本号
+- **更新提示优化**：手动检查更新时显示当前版本信息
+
+### 🔧 Fixed
+- **修复权限检测问题**：恢复使用 File::open() 进行权限检测，确保准确识别完全磁盘访问权限
+
+## [0.4.1] - 2026-03-05
+
+### 🔧 Fixed
+- **修复 Dock 图标显示问题**：通过设置 ActivationPolicy::Accessory 确保应用不在 Dock 中显示
+- **修复权限弹窗问题**：优化权限检查逻辑，避免重复弹出系统授权对话框
+- **优化启动逻辑**：在缺少完全磁盘访问权限时不启动监控，避免无效操作
+
+## [0.4.0] - 2026-03-05
+
+### ✨ Added
+- **手动检查更新**：在设置页面新增"检查更新"按钮，支持手动检测并安装更新
+
 ## [0.3.1] - 2026-03-05
 
 ### 🎨 Changed

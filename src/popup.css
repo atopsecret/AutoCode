@@ -1,0 +1,13 @@
+:root { color-scheme: dark; }
+* { box-sizing: border-box; }
+body { margin: 0; padding: 12px; background: #1c1c1e; color: #f5f5f7; font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+.popup-card { border: 1px solid #49494e; border-radius: 12px; padding: 16px; background: #2c2c2e; }
+header { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; color: #aaaab2; }
+button { cursor: pointer; font: inherit; border: 0; }
+.dismiss { background: transparent; color: #b9b9c0; font-size: 24px; line-height: 1; padding: 2px 6px; }
+.popup-code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 30px; letter-spacing: 3px; margin: 16px 0 8px; text-align: center; user-select: text; }
+.popup-source { font-size: 11px; color: #aaaab2; overflow-wrap: anywhere; min-height: 16px; text-align: center; }
+.copy { width: 100%; padding: 10px; border-radius: 8px; background: #0a84ff; color: white; margin-top: 16px; }
+.copy:disabled { cursor: default; opacity: 0.5; }
+p { color: #aaaab2; font-size: 11px; line-height: 1.5; margin: 10px 0 0; text-align: center; }
+button:focus-visible { outline: 2px solid #90c8ff; outline-offset: 3px; }

@@ -20,6 +20,8 @@
 
 </div>
 
+> 当前工作分支是未发布的 **0.6.0 修复版**。行为、测试命令和限制见 [REPAIR_NOTES.md](REPAIR_NOTES.md)。下方发布说明属于历史版本，不代表本修复版已通过真机验收；本版暂停全局自动回车，未知目标改为浮窗提示。
+
 ---
 
 ## 中文
@@ -61,7 +63,8 @@ AutoCode 是一款专为 macOS 设计的智能验证码助手，利用苹果生�
 - **🔍 多源监听**
   - iMessage 短信验证码
   - Apple Mail 邮件验证码
-  - Spotlight 邮件源（支持 Outlook、Gmail 等第三方邮件客户端）
+  - Spotlight 邮件源（支持旧版 Outlook、Gmail 等第三方邮件客户端）
+  - 系统通知监控（支持新版 Microsoft Outlook 和所有邮件客户端）
 
 - **🧠 智能提取**
   - 模板正则匹配（高精度）
@@ -194,7 +197,8 @@ AutoCode/
     │   ├── monitor/         # 监控模块
     │   │   ├── imessage.rs  # iMessage 监控
     │   │   ├── apple_mail.rs # Apple Mail 监控
-    │   │   └── outlook.rs   # Spotlight 邮件监控
+    │   │   ├── outlook.rs   # Spotlight 邮件监控
+    │   │   └── notification.rs # 系统通知监控
     │   ├── extractor.rs     # 验证码提取引擎
     │   ├── paste.rs         # 粘贴策略处理
     │   ├── config.rs        # 配置管理
@@ -319,7 +323,8 @@ AutoCode is an intelligent verification code assistant designed for macOS that l
 - **🔍 Multi-Source Monitoring**
   - iMessage SMS verification codes
   - Apple Mail email verification codes
-  - Spotlight mail sources (supports Outlook, Gmail, and other third-party email clients)
+  - Spotlight mail sources (supports legacy Outlook, Gmail, and other third-party email clients)
+  - System notification monitoring (supports new Microsoft Outlook and all email clients)
 
 - **🧠 Smart Extraction**
   - Template regex matching (high precision)

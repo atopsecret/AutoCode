@@ -19,6 +19,8 @@
       </button>
     </nav>
 
+    <section class="startup-error" id="startup-error" role="alert" hidden></section>
+
     <!-- ====== 主页 ====== -->
     <div class="page active" id="page-home">
       <div class="container">
@@ -37,7 +39,7 @@
           <div class="perm-item" id="perm-fda" style="display: none;">
             <div class="perm-info">
               <span class="perm-name">完全磁盘访问</span>
-              <span class="perm-desc">读取 iMessage 和 Apple Mail 所需。请将 AutoCode.app 添加到列表中。</span>
+              <span class="perm-desc">受保护的消息、邮件或通知来源可能需要此权限；每个来源的实际错误见监控状态。</span>
             </div>
             <button class="perm-btn" id="btn-open-fda">前往开启</button>
           </div>
@@ -57,14 +59,22 @@
             <div class="status-chip" id="status-imessage">
               <span class="status-dot"></span>
               <span class="status-label">iMessage</span>
+              <span class="status-detail">正在启动</span>
             </div>
             <div class="status-chip" id="status-applemail">
               <span class="status-dot"></span>
               <span class="status-label">Apple Mail</span>
+              <span class="status-detail">正在启动</span>
             </div>
             <div class="status-chip" id="status-outlook">
               <span class="status-dot"></span>
               <span class="status-label">Spotlight 邮件</span>
+              <span class="status-detail">正在启动</span>
+            </div>
+            <div class="status-chip" id="status-notification">
+              <span class="status-dot"></span>
+              <span class="status-label">邮件通知</span>
+              <span class="status-detail">正在启动</span>
             </div>
           </div>
         </section>
@@ -129,6 +139,16 @@
               <span class="slider"></span>
             </label>
           </div>
+          <div class="setting-row">
+            <div class="setting-info">
+              <span class="setting-name">邮件系统通知</span>
+              <span class="setting-desc">读取邮件客户端的系统通知；与 Spotlight 独立启停</span>
+            </div>
+            <label class="switch">
+              <input type="checkbox" id="cfg-listen-notification" />
+              <span class="slider"></span>
+            </label>
+          </div>
         </section>
 
         <!-- 粘贴行为 -->
@@ -146,23 +166,23 @@
               <span class="radio-mark"></span>
               <div>
                 <span class="radio-label">智能模式</span>
-                <span class="radio-desc">避免与系统 AutoFill 冲突</span>
+                <span class="radio-desc">仅在目标与验证码输入框可确认时填入；否则提示或复制</span>
               </div>
             </label>
             <label class="radio-item">
               <input type="radio" name="paste_mode" value="always" />
               <span class="radio-mark"></span>
               <div>
-                <span class="radio-label">总是粘贴</span>
-                <span class="radio-desc">无论前台应用都自动粘贴</span>
+                <span class="radio-label">自动填入</span>
+                <span class="radio-desc">仍需核验目标和焦点；切换窗口后不自动输入</span>
               </div>
             </label>
             <label class="radio-item">
               <input type="radio" name="paste_mode" value="floating_only" />
               <span class="radio-mark"></span>
               <div>
-                <span class="radio-label">仅通知</span>
-                <span class="radio-desc">只显示通知，手动粘贴</span>
+                <span class="radio-label">仅悬浮提示</span>
+                <span class="radio-desc">显示不抢焦点的验证码浮窗，点击后才复制</span>
               </div>
             </label>
             <label class="radio-item">
@@ -178,10 +198,10 @@
           <div class="setting-row" style="margin-top: 8px;">
             <div class="setting-info">
               <span class="setting-name">粘贴后自动回车</span>
-              <span class="setting-desc">自动按回车提交验证码</span>
+              <span class="setting-desc" id="auto-enter-note">本版暂停自动回车。无法核验提交按钮所属服务，请手动提交。</span>
             </div>
             <label class="switch">
-              <input type="checkbox" id="cfg-auto-enter" />
+              <input type="checkbox" id="cfg-auto-enter" disabled aria-describedby="auto-enter-note" />
               <span class="slider"></span>
             </label>
           </div>
@@ -192,7 +212,7 @@
               <span class="setting-desc">Smart 模式下等待系统 AutoFill 的时间</span>
             </div>
             <div class="range-control">
-              <input type="range" id="cfg-autofill-delay" min="500" max="5000" step="100" />
+              <input type="range" id="cfg-autofill-delay" min="100" max="10000" step="100" />
               <span class="range-value" id="delay-value">1500ms</span>
             </div>
           </div>
@@ -214,7 +234,7 @@
           <div class="setting-row">
             <div class="setting-info">
               <span class="setting-name">检查更新</span>
-              <span class="setting-desc">检查并安装最新版本</span>
+              <span class="setting-desc" id="current-version">当前版本：加载中...</span>
             </div>
             <button class="perm-btn" id="btn-check-update">检查更新</button>
           </div>
@@ -275,10 +295,10 @@
           <button class="btn btn-primary" id="btn-save">保存设置</button>
         </div>
 
-        <div class="save-toast" id="save-toast">设置已保存</div>
       </div>
     </div>
 
-    <script src="main.js"></script>
+    <div class="save-toast" id="save-toast" role="status" aria-live="polite">设置已保存</div>
+    <script type="module" src="main.js"></script>
   </body>
 </html>

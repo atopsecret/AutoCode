@@ -1,0 +1,12 @@
+{
+  "historical_fixture": true,
+  "version": "0.5.0",
+  "notes": "新增系统通知监控，支持新版 Outlook",
+  "pub_date": "2026-03-06T04:13:32Z",
+  "platforms": {
+    "darwin-aarch64": {
+      "signature": "61ddb3913b34c8666237aae936f0389e164e26f374f6a26d051d6d164d8b62a6",
+      "url": "https://github.com/skernelx/AutoCode/releases/download/v0.5.0/AutoCode_0.5.0_aarch64.dmg"
+    }
+  }
+}

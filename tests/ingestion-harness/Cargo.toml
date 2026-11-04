@@ -1,0 +1,16 @@
+[package]
+name = "autocode-ingestion-tests"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+anyhow = "=1.0.102"
+base64 = "=0.22.1"
+chrono = "=0.4.44"
+notify = "=8.2.0"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "=1.51.1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-util = "0.7"
+
+[lib]
+path = "src/lib.rs"

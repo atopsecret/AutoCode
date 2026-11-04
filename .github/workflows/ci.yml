@@ -1,0 +1,32 @@
+name: AutoCode checks
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  macos:
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      # 包含完整 crate 测试、release bundle、codesign 和 ZIP 静态验证。
+      # 不提供发布密钥，不启动监控，不发布 Release，不操作个人数据。
+      - run: python3 scripts/build-local.py --bundles app --dependency-timeout 180
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: AutoCode-macos-${{ github.sha }}
+          path: artifacts/build-*/*/
+          if-no-files-found: error
+          retention-days: 14
