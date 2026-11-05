@@ -12,15 +12,15 @@
 [![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](./LICENSE)
 
 <p align="center">
-  <img src="https://img.shields.io/github/stars/skernelx/AutoCode?style=social" alt="GitHub stars">
-  <img src="https://img.shields.io/github/forks/skernelx/AutoCode?style=social" alt="GitHub forks">
+  <img src="https://img.shields.io/github/stars/atopsecret/AutoCode?style=social" alt="GitHub stars">
+  <img src="https://img.shields.io/github/forks/atopsecret/AutoCode?style=social" alt="GitHub forks">
 </p>
 
 [English](#english) | [中文](#中文)
 
 </div>
 
-> 当前工作分支是未发布的 **0.6.0 修复版**。行为、测试命令和限制见 [REPAIR_NOTES.md](REPAIR_NOTES.md)。下方发布说明属于历史版本，不代表本修复版已通过真机验收；本版暂停全局自动回车，未知目标改为浮窗提示。
+> 仓库已迁移到 **atopsecret/AutoCode**，恢复 **0.6.0** 源码与 Apple Silicon 安装包。行为、测试命令和限制见 [REPAIR_NOTES.md](REPAIR_NOTES.md)。本版暂停全局自动回车，未知目标改为浮窗提示；未完成真实消息与辅助功能填入的真机验收。安装包须手动安装，不提供签名自动更新。
 
 ---
 
@@ -45,14 +45,14 @@
 当你的 iPhone 收到验证码短信或邮件时，AutoCode 会：
 1. ✅ 自动在 Mac 上检测到（通过 iCloud 同步的 iMessage 和邮件）
 2. ✅ 智能提取验证码
-3. ✅ **在任何应用中自动输入**：Chrome、Firefox、Electron 应用、终端、任何有输入框的地方
+3. ✅ 在可识别的辅助功能输入框中定向填入；未知目标显示验证码浮窗
 4. ✅ 无需掏出手机，无需手动输入
 
 **适用场景：**
 - 🌐 任何浏览器：Chrome、Firefox、Edge、Brave...
 - 💻 桌面应用：Slack、Discord、VS Code、终端...
 - 🎮 游戏客户端、虚拟机、远程桌面...
-- 📝 只要有输入框，就能自动填充！
+- 📝 是否能自动填入取决于目标应用是否提供可识别的辅助功能输入框。
 
 ### ✨ 核心特性
 
@@ -83,19 +83,19 @@ AutoCode 是一款专为 macOS 设计的智能验证码助手，利用苹果生�
   - 系统托盘常驻，快速访问
   - 实时同步配置状态
   - 验证码历史记录
-  - 支持自动回车
+  - 验证码浮窗；0.6.0 暂停全局自动回车
   - 开机自启动
 
 ### 📦 安装
 
 #### 下载预编译版本
 
-前往 [Releases](https://github.com/skernelx/AutoCode/releases) 页面下载最新版本的 `.dmg` 文件。
+前往 [AutoCode 0.6.0](https://github.com/atopsecret/AutoCode/releases/tag/v0.6.0) 下载 `AutoCode_0.6.0_arm64.app.zip`，并用同页的 `SHA256SUMS` 核对文件。本次恢复的是 Apple Silicon ZIP，不提供 Intel、universal 或 DMG 包。
 
 **安装步骤：**
 
-1. 下载并打开 `.dmg` 文件
-2. 将 AutoCode.app 拖到应用程序文件夹
+1. 下载并解压 `AutoCode_0.6.0_arm64.app.zip`
+2. 将 `AutoCode.app` 放入 `/Applications`
 
 **首次打开方法（二选一）：**
 
@@ -111,23 +111,23 @@ sudo xattr -rd com.apple.quarantine /Applications/AutoCode.app
 然后正常双击打开即可。
 
 > 💡 **为什么需要这些步骤？**
-> AutoCode 是开源免费软件，未购买 Apple Developer 账号进行公证。这不影响功能和安全性，所有代码都是开源可审计的。
+> 此包使用本地 ad-hoc 签名，未使用 Developer ID 签名，也未完成 Apple 公证。首次打开可能被 Gatekeeper 拦截；源码可供审阅，但不把开源或静态检查当作真机验收。
 
 #### 从源码构建
 
 ```bash
 # 克隆仓库
-git clone https://github.com/skernelx/AutoCode.git
+git clone https://github.com/atopsecret/AutoCode.git
 cd AutoCode
 
 # 安装依赖
-npm install
+npm ci
 
 # 开发模式
 npm run tauri dev
 
 # 生产构建
-npm run tauri build
+npm run build
 ```
 
 **环境要求：**
@@ -305,14 +305,14 @@ Have you ever experienced this scenario:
 When your iPhone receives a verification code via SMS or email, AutoCode will:
 1. ✅ Automatically detect it on your Mac (via iCloud-synced iMessage and Mail)
 2. ✅ Intelligently extract the verification code
-3. ✅ **Auto-type in ANY application**: Chrome, Firefox, Electron apps, Terminal, anywhere with an input field
+3. ✅ Fill recognized Accessibility input fields directly; show a verification-code popup for unknown targets
 4. ✅ No need to pull out your phone, no manual typing required
 
 **Use Cases:**
 - 🌐 Any browser: Chrome, Firefox, Edge, Brave...
 - 💻 Desktop apps: Slack, Discord, VS Code, Terminal...
 - 🎮 Game clients, virtual machines, remote desktop...
-- 📝 Anywhere with an input field, auto-fill works!
+- 📝 Automatic filling depends on whether the target exposes a recognizable Accessibility input field.
 
 ### ✨ Core Features
 
@@ -343,19 +343,19 @@ AutoCode is an intelligent verification code assistant designed for macOS that l
   - System tray resident for quick access
   - Real-time configuration sync
   - Verification code history
-  - Auto-enter support
+  - Verification-code popup; global auto-enter is disabled in 0.6.0
   - Launch at login
 
 ### 📦 Installation
 
 #### Download Pre-built Version
 
-Visit the [Releases](https://github.com/skernelx/AutoCode/releases) page to download the latest `.dmg` file.
+Download `AutoCode_0.6.0_arm64.app.zip` from [AutoCode 0.6.0](https://github.com/atopsecret/AutoCode/releases/tag/v0.6.0), and verify it against `SHA256SUMS` on the same page. This restored release provides an Apple Silicon ZIP only, not an Intel, universal, or DMG package. Installation is manual; no signed Tauri update manifest is provided.
 
 **Installation Steps:**
 
-1. Download and open the `.dmg` file
-2. Drag AutoCode.app to the Applications folder
+1. Download and extract `AutoCode_0.6.0_arm64.app.zip`
+2. Move `AutoCode.app` into `/Applications`
 
 **First Launch (choose one method):**
 
@@ -371,23 +371,23 @@ sudo xattr -rd com.apple.quarantine /Applications/AutoCode.app
 Then you can open it normally by double-clicking.
 
 > 💡 **Why these steps?**
-> AutoCode is free and open-source software without an Apple Developer account for notarization. This doesn't affect functionality or security - all code is open source and auditable.
+> This package is ad-hoc signed, not Developer ID signed or Apple-notarized. Gatekeeper may block the first launch. Source review and static checks do not replace testing real message sources or Accessibility-based input.
 
 #### Build from Source
 
 ```bash
 # Clone repository
-git clone https://github.com/skernelx/AutoCode.git
+git clone https://github.com/atopsecret/AutoCode.git
 cd AutoCode
 
 # Install dependencies
-npm install
+npm ci
 
 # Development mode
 npm run tauri dev
 
 # Production build
-npm run tauri build
+npm run build
 ```
 
 **Requirements:**

@@ -96,7 +96,14 @@ class UpdateManifestTests(unittest.TestCase):
         manifest = json.loads(self.output.read_text())
         self.assertEqual(manifest['notes'], notes)
         self.assertEqual(manifest['platforms']['darwin-aarch64']['signature'], signature)
-        self.assertTrue(manifest['platforms']['darwin-aarch64']['url'].endswith('/AutoCode.app.tar.gz'))
+        self.assertEqual(manifest['platforms']['darwin-aarch64']['url'],
+                         'https://github.com/atopsecret/AutoCode/releases/download/v0.6.0/AutoCode.app.tar.gz')
+
+    def test_source_updater_uses_migrated_repository_endpoint(self):
+        config = json.loads((SCRIPT.parents[1] / 'src-tauri/tauri.conf.json').read_text())
+        self.assertEqual(config['plugins']['updater']['endpoints'], [
+            'https://github.com/atopsecret/AutoCode/releases/latest/download/latest.json',
+        ])
 
     def test_placeholder_public_key_is_not_accepted(self):
         self.config(public_key='synthetic-public-key')

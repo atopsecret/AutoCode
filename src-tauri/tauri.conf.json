@@ -48,7 +48,7 @@
   "plugins": {
     "updater": {
       "endpoints": [
-        "https://github.com/skernelx/AutoCode/releases/latest/download/latest.json"
+        "https://github.com/atopsecret/AutoCode/releases/latest/download/latest.json"
       ],
       "pubkey": ""
     }

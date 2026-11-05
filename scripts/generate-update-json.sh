@@ -99,7 +99,7 @@ manifest = {
     "platforms": {
         "darwin-aarch64": {
             "signature": signature,
-            "url": f"https://github.com/skernelx/AutoCode/releases/download/v{version}/AutoCode.app.tar.gz",
+            "url": f"https://github.com/atopsecret/AutoCode/releases/download/v{version}/AutoCode.app.tar.gz",
         },
     },
 }

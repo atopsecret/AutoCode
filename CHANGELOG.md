@@ -5,7 +5,13 @@ All notable changes to AutoCode will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.0] - Unreleased
+## 仓库迁移 - 2026-11-05
+
+- 仓库与后续更新地址改为 `atopsecret/AutoCode`，恢复 0.6.0 的 Apple Silicon App ZIP、精确源码 ZIP 和 SHA-256 清单。
+- 保留原安装包内容；此次迁移不是新版本发布，不提供 `latest.json` 或 Tauri 自动更新签名。
+- 下文 0.1.1、0.2.0 的旧仓库链接仅作为历史出处保留，不代表相应发布包已恢复。
+
+## [0.6.0] - 2026-11-04
 
 - 修复通知路径、schema/plist 解析、分页及失败游标处理。
 - 各来源独立状态、授权恢复、退避重试和 panic 监督。
